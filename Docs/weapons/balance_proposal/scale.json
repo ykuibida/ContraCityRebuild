@@ -1,0 +1,254 @@
+{
+ "shared": [
+  {
+   "sname": "OHCA_Crowbar",
+   "name": "Лом",
+   "cls": "melee",
+   "relaunch": [
+    42,
+    null,
+    null
+   ],
+   "ne": [
+    29.0,
+    29.0,
+    29.0
+   ],
+   "ratio": [
+    0.69,
+    null,
+    null
+   ],
+   "line": 397
+  },
+  {
+   "sname": "HG_SIGSauerP226_B",
+   "name": "Дружинник",
+   "cls": "pistol",
+   "relaunch": [
+    31,
+    30,
+    19
+   ],
+   "ne": [
+    34.0,
+    32.0,
+    25.0
+   ],
+   "ratio": [
+    1.097,
+    1.067,
+    1.316
+   ],
+   "line": 401
+  },
+  {
+   "sname": "HG_Glock_S",
+   "name": "Политрук",
+   "cls": "pistol",
+   "relaunch": [
+    19,
+    15,
+    8
+   ],
+   "ne": [
+    13.0,
+    12.0,
+    9.0
+   ],
+   "ratio": [
+    0.684,
+    0.8,
+    1.125
+   ],
+   "line": 402
+  },
+  {
+   "sname": "HG_Desert",
+   "name": "Сокол",
+   "cls": "pistol",
+   "relaunch": [
+    67,
+    62.5,
+    43
+   ],
+   "ne": [
+    44.0,
+    36.0,
+    28.0
+   ],
+   "ratio": [
+    0.657,
+    0.576,
+    0.651
+   ],
+   "line": 424
+  },
+  {
+   "sname": "HG_GlockB01_S",
+   "name": "Спекулянт",
+   "cls": "pistol",
+   "relaunch": [
+    9,
+    8,
+    4
+   ],
+   "ne": [
+    19.0,
+    15.0,
+    11.0
+   ],
+   "ratio": [
+    2.111,
+    1.875,
+    2.75
+   ],
+   "line": 423
+  },
+  {
+   "sname": "MG_AK47B06",
+   "name": "Засад",
+   "cls": "rifle",
+   "relaunch": [
+    26.5,
+    25,
+    14.5
+   ],
+   "ne": [
+    25.0,
+    20.0,
+    16.0
+   ],
+   "ratio": [
+    0.943,
+    0.8,
+    1.103
+   ],
+   "line": 418
+  },
+  {
+   "sname": "MG_AK47B07",
+   "name": "Смертобой",
+   "cls": "rifle",
+   "relaunch": [
+    20,
+    null,
+    null
+   ],
+   "ne": [
+    30.0,
+    24.0,
+    20.0
+   ],
+   "ratio": [
+    1.5,
+    null,
+    null
+   ],
+   "line": 420
+  },
+  {
+   "sname": "MG_AK47B08",
+   "name": "Звездочет",
+   "cls": "rifle",
+   "relaunch": [
+    20,
+    null,
+    null
+   ],
+   "ne": [
+    27.0,
+    21.0,
+    17.0
+   ],
+   "ratio": [
+    1.35,
+    null,
+    null
+   ],
+   "line": 425
+  },
+  {
+   "sname": "SR_Arctic",
+   "name": "Писец",
+   "cls": "sniper",
+   "relaunch": [
+    55,
+    102,
+    null
+   ],
+   "ne": [
+    54.0,
+    122.0,
+    136.0
+   ],
+   "ratio": [
+    0.982,
+    1.196,
+    null
+   ],
+   "line": 415
+  },
+  {
+   "sname": "SR_M110_B",
+   "name": "Клык",
+   "cls": "sniper",
+   "relaunch": [
+    null,
+    37.5,
+    43.5
+   ],
+   "ne": [
+    17.0,
+    32.0,
+    36.0
+   ],
+   "ratio": [
+    null,
+    0.853,
+    0.828
+   ],
+   "line": 407
+  },
+  {
+   "sname": "RL_RPG7B02",
+   "name": "Троллебузина",
+   "cls": "explosive",
+   "relaunch": [
+    70,
+    70,
+    70
+   ],
+   "ne": [
+    90.0,
+    90.0,
+    90.0
+   ],
+   "ratio": [
+    1.286,
+    null,
+    null
+   ],
+   "line": 419
+  }
+ ],
+ "factors": {
+  "melee": 0.69,
+  "pistol": 1.082,
+  "rifle": 1.103,
+  "sniper": 0.917,
+  "explosive": 1.286,
+  "all": 1.067,
+  "rate": 1.076
+ },
+ "rateRatios": {
+  "HG_Desert": 0.594,
+  "SR_Arctic": 0.881,
+  "MG_AK47B06": 1.363,
+  "HG_GlockB01_S": 1.194,
+  "HG_SIGSauerP226_B": 1.132,
+  "HG_Glock_S": 0.7,
+  "OHCA_Crowbar": 1.082,
+  "MG_AK47B07": 1.07
+ }
+}
