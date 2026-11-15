@@ -82,14 +82,23 @@ public class MotorTrace
 
     static bool layerReady;
 
-    /// <summary>The ghost layer collides with everything the player's layer (2) collides with, but not with the player or other ghosts.</summary>
+    /// <summary>The ghost layer collides with everything the player's layer (2) collides with, layer-2 map geometry included, but
+    /// not with other ghosts; the player itself is ignored per ghost (IgnorePlayer), since layer 2 also holds map colliders.</summary>
     public static void SetupGhostLayer()
     {
         if (layerReady) return;
         for (int l = 0; l < 32; l++) Physics.IgnoreLayerCollision(CharacterMotor.GhostLayer, l, Physics.GetIgnoreLayerCollision(2, l));
-        Physics.IgnoreLayerCollision(CharacterMotor.GhostLayer, 2, true);
+        Physics.IgnoreLayerCollision(CharacterMotor.GhostLayer, 2, Physics.GetIgnoreLayerCollision(2, 2));
         Physics.IgnoreLayerCollision(CharacterMotor.GhostLayer, CharacterMotor.GhostLayer, true);
         layerReady = true;
+    }
+
+    /// <summary>A ghost must not bump into the live player.</summary>
+    public static void IgnorePlayer(GameObject ghost)
+    {
+        var player = GameFlow.Instance != null ? GameFlow.Instance.Player : null;
+        var a = ghost.GetComponent<CharacterController>(); var b = player != null ? player.GetComponent<CharacterController>() : null;
+        if (a != null && b != null) Physics.IgnoreCollision(a, b, true);
     }
 
     /// <summary>A simulated fighter with the template's capsule and tuning; nothing steps it but its owner.</summary>
@@ -107,6 +116,7 @@ public class MotorTrace
         var s = go.AddComponent<SoldierController>();
         s.externallyStepped = true; s.simulated = true;
         s.CopySettingsFrom(template.GetComponent<SoldierController>());
+        IgnorePlayer(go);
         return go;
     }
 

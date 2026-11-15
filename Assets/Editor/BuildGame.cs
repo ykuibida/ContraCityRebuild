@@ -56,6 +56,9 @@ public static class BuildGame
             target = BuildTarget.StandaloneWindows64, options = BuildOptions.None,
         });
         Debug.Log("[BuildGame] " + report.summary.result + " " + report.summary.totalSize / (1024 * 1024) + " MB");
+        // the map lab (bots step 2): a shortcut next to the game
+        if (report.summary.result == UnityEditor.Build.Reporting.BuildResult.Succeeded)
+            File.WriteAllText("Builds/ContraCity/Лаборатория.bat", "@echo off\r\nstart \"\" \"%~dp0ContraCity.exe\" -lab Bit_map\r\n");
     }
 
     static void CreateLobbyScene()
