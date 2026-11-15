@@ -196,6 +196,11 @@ public class ShotController : MonoBehaviour
     bool FireDown => Input.GetKeyDown(TRInput.Fire1) || testFireDown;
     bool FireUp => Input.GetKeyUp(TRInput.Fire1) || testFireUp;
     static BattleUI Hud => UIRoot.Instance ? UIRoot.Instance.Battle : null;
+    /// <summary>Rebuild (bots lab, walk mode): the lab has no battle HUD, so weapons would never fire or switch; true lets them.</summary>
+    public static bool LabControl;
+    static bool HudActive => LabControl || (Hud != null && Hud.IsHudActive);
+    /// <summary>Rebuild (bots lab): every shot the local fighter sends (its weapon type), so the lab knows which moves the owner made.</summary>
+    public static event System.Action<WeaponType> LocalShotSent;
 
     void Update()
     {
@@ -212,7 +217,7 @@ public class ShotController : MonoBehaviour
             shotgunReloadInterruptArmed = false;
         }
         if (Input.GetKeyUp(KeyCode.Mouse1)) shotAlt = false;
-        if (Hud == null || !Hud.IsHudActive) return;            // GameHUD.isActive (NE GameHUD.cs:545-556)
+        if (!HudActive) return;            // GameHUD.isActive (NE GameHUD.cs:545-556)
         // 嚍.IsWrite (chat input) — there is no battle chat input
         if (isTaunt) return;                                    // the taunt runs to its end (owner's rule: never interrupted)
         if (GameFlow.Instance != null && GameFlow.Instance.Player) Hud.ShowWeapon();   // :1246-1250 GameHUD.UpdateHealth + ShowWeapon every frame
@@ -862,6 +867,7 @@ public class ShotController : MonoBehaviour
     /// 9377-9536): the targets first (offline only the shooter himself — own explosions), then ShotEffect(ME_AFTER_SERVER) → OnShot.</summary>
     public void SendShot(Shot s)
     {
+        LocalShotSent?.Invoke(s.WeaponType);
         if (s.HasTargets)
             foreach (var target in s.Targets)
             {
@@ -923,7 +929,7 @@ public class ShotController : MonoBehaviour
     IEnumerator DelayedShot(Transform a, CombatWeapon b)
     {
         yield return new WaitForSeconds(0.2f);
-        if (Hud == null || !Hud.IsHudActive || b == null || fpsCamera == null) yield break;
+        if (!HudActive || b == null || fpsCamera == null) yield break;
         Ray ray = fpsCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 20f));
         AnimateCrossHair();
         var type = (WeaponType)b.GetType();

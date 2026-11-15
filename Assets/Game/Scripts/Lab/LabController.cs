@@ -97,6 +97,77 @@ public class LabController : MonoBehaviour
     int walkLearned; string walkNote = "";
     readonly List<Vector3> walkRun = new List<Vector3>(); LineRenderer walkLine; bool walkRunOk; Vector3 walkLast;
 
+    // the owner's jumps in walk mode (15.11.2026: «дай мне в руки дробовик — покажу, как можно запрыгнуть»): every time in the air
+    // from a take-off to a landing that holds 0.3 s, with what he did in the air. Only recorded (next to the walk file, with what the
+    // lab knows about each): they show where the search misses ways, and the search is fixed for all maps — the lab does not learn
+    // single jumps into its cache (the owner: keep it simple)
+    class AirEp { public Vector3 takeoff, landing; public float t0, t1, speed0; public int shotgun, rockets, hops = 1; public bool bat, jumped; public LabSim.Move move; public string result = ""; }
+    readonly List<AirEp> walkEps = new List<AirEp>(); AirEp curEp; float groundedSince = -1f, lastRocketT = -10f; Vector3 lastGround;
+    int walkDamage;
+    static WeaponType Held => ShotController.Instance != null && ShotController.Instance.CurrentWeapon != null ? ShotController.Instance.CurrentWeapon.Type : WeaponType.NONE;
+
+    void OnWalkShot(WeaponType t)
+    {
+        if (!walker) return;
+        if (t == WeaponType.SHOT_GUN && curEp != null) curEp.shotgun++;
+        if (t == WeaponType.ROCKET_LAUNCHER) { if (curEp != null) curEp.rockets++; else lastRocketT = Time.time; }
+    }
+
+    void TrackAir()
+    {
+        var m = walker.GetComponent<CharacterMotor>(); var p = walker.transform.position;
+        if (m.grounded)
+        {
+            if (curEp == null) { lastGround = p; return; }
+            if (groundedSince < 0f) groundedSince = Time.time;
+            if (Time.time - groundedSince < 0.3f) return;
+            var e = curEp; curEp = null; groundedSince = -1f; lastGround = p;
+            e.landing = p; e.t1 = Time.time;
+            e.move = e.rockets > 0 ? (e.shotgun > 0 ? LabSim.Move.RocketShotgun : LabSim.Move.Rocket) : e.shotgun > 0 ? LabSim.Move.Shotgun
+                : e.bat && e.jumped ? LabSim.Move.Bat : e.hops >= 2 && e.jumped ? LabSim.Move.Bunnyhop : e.jumped ? (e.speed0 > 8f ? LabSim.Move.RunJump : LabSim.Move.Jump) : LabSim.Move.Walk;
+            if (LabSim.Horizontal(e.landing - e.takeoff) < 1.5f && Mathf.Abs(e.landing.y - e.takeoff.y) < 1f) return;   // up and down on the spot
+            walkEps.Add(e);
+            LabDraw.Line("OwnerJump", new List<Vector3> { e.takeoff + Vector3.up * 0.5f, (e.takeoff + e.landing) / 2f + Vector3.up * (2f + Mathf.Max(0f, e.landing.y - e.takeoff.y)), e.landing + Vector3.up * 0.5f }, LabSim.ColorOf(e.move), 0.6f, routeRoot);
+            return;
+        }
+        if (curEp == null)
+        {
+            var v = m.movement.velocity; var hv = v; hv.y = 0f;
+            curEp = new AirEp { takeoff = lastGround, t0 = Time.time, bat = Held == WeaponType.ONE_HANDED_COLD_ARMS, jumped = v.y > 2f, speed0 = hv.magnitude, rockets = Time.time - lastRocketT < 0.6f ? 1 : 0 };
+        }
+        else if (groundedSince >= 0f) { curEp.hops++; groundedSince = -1f; if (m.movement.velocity.y > 2f) curEp.jumped = true; }
+    }
+
+    /// <summary>After the walk: the owner's jumps next to the walk file, each with what the lab knows (the bot's route there and its
+    /// time, or why none), and the places he stood that the grid has no cell for (what the grid saw there).</summary>
+    void WriteJumps(string walkFile)
+    {
+        int unknown = 0;
+        foreach (var e in walkEps)
+        {
+            int ra = world.RegionAt(e.takeoff, 2f), rb = world.RegionAt(e.landing, 2f);
+            if (ra < 0 || rb < 0) { e.result = ra < 0 ? "отрыв не на сетке" : "приземление не на сетке"; unknown++; continue; }
+            var r = links.reachable.Contains(rb) ? links.FindRoute(e.takeoff, e.landing, allowedMask) : null;
+            if (r == null) { e.result = $"лаборатория туда пути не знает (участок {rb} {(links.reachable.Contains(rb) ? "достижим" : "серый")})"; unknown++; }
+            else if (r.time > (e.t1 - e.t0) + 2f) { e.result = $"у бота путь дольше: {r.Describe()}"; unknown++; }
+            else e.result = $"бот умеет: {r.Describe()}";
+        }
+        walkNote += $"\nТвоих прыжков: {walkEps.Count}, из них лаборатория не знала {unknown}. Записал, разберу.";
+        // the episodes and the places he stood that the grid does not have, next to the walk file
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"# {map}: the owner's jumps ({walkEps.Count}), damage taken {walkDamage}");
+        foreach (var e in walkEps) sb.AppendLine($"{e.move} {e.takeoff} -> {e.landing} air {e.t1 - e.t0:F2} s, shotgun {e.shotgun}, rockets {e.rockets}, hops {e.hops}, bat {e.bat}, run {e.speed0:F1}: {e.result}");
+        sb.AppendLine("# grounded where the grid has no cell (what the grid saw there)");
+        var shown = new List<Vector3>();
+        foreach (var w in walkLog.Where(x => x.grounded && x.region < 0))
+        {
+            if (shown.Any(q => Vector3.Distance(q, w.p) < 3f) || shown.Count >= 15) continue;
+            shown.Add(w.p);
+            sb.AppendLine($"{w.p}:{world.WhyApart(w.p + Vector3.left * 1.5f, w.p + Vector3.right * 1.5f)}");
+        }
+        if (walkFile != null) File.WriteAllText(Path.ChangeExtension(walkFile, ".jumps.txt"), sb.ToString());
+    }
+
     void StartWalk()
     {
         if (walker) return;
@@ -109,6 +180,15 @@ public class LabController : MonoBehaviour
         }
         ClearRoute();
         walker = PlayerRig.Create(feet + Vector3.up * 0.5f, yaw, cam);
+        // as the battle spawns him (GameFlow.ApplyProfileToPlayer): the profile's speed, health, armor; weapons work without the battle
+        // HUD; damage (own rockets, falls) is counted but he never dies
+        walker.GetComponent<SoldierController>().ForceBattleMovementValues(statsMultiplier);
+        var vit = walker.GetComponent<PlayerVitals>();
+        try { var bs = BattleStats.Compute(Profile.Current); vit.MaxHealth = bs.MaxHealth; vit.ResetForSpawn(); vit.Armor = vit.MaxArmor = Mathf.Max(bs.MaxArmor, 0); vit.FallDamageMultiplier = bs.FallDamageMultiplier; } catch { }
+        walkDamage = 0;
+        vit.Damaged += d => { walkDamage += d; vit.Health = vit.MaxHealth; vit.Armor = vit.MaxArmor; };
+        ShotController.LabControl = true; ShotController.LocalShotSent -= OnWalkShot; ShotController.LocalShotSent += OnWalkShot;
+        walkEps.Clear(); curEp = null; groundedSince = -1f; lastRocketT = -10f; lastGround = feet;
         cam.enabled = false; var fly = cam.GetComponent<FlyCamera>(); if (fly) fly.enabled = false;
         var al = cam.GetComponent<AudioListener>(); if (al) al.enabled = false;
         Cursor.lockState = CursorLockMode.Locked; Cursor.visible = false;
@@ -120,6 +200,7 @@ public class LabController : MonoBehaviour
         if (!walker) return;
         var last = walker.transform.position;
         Destroy(walker); walker = null;
+        ShotController.LabControl = false; ShotController.LocalShotSent -= OnWalkShot;
         cam.enabled = true; var fly = cam.GetComponent<FlyCamera>(); if (fly) fly.enabled = true;
         var al = cam.GetComponent<AudioListener>(); if (al) al.enabled = true;
         cam.transform.position = last + Vector3.up * 14f - cam.transform.forward * 12f; SyncFly();
@@ -135,8 +216,9 @@ public class LabController : MonoBehaviour
         // regions reachable through the newly learned links in turn (the owner walked on through them)
         bool grew = true; while (grew) { grew = false; foreach (var l in links.links.Where(l => l.observed)) if (links.reachable.Contains(l.fromRegion) && links.reachable.Add(l.toRegion)) { grew = true; walkLearned++; } }
         if (walkLearned > 0) { world.BuildMesh(links.reachable); }
-        SaveWalk(greyPoints);
+        var file = SaveWalk(greyPoints);
         walkNote = $"Записано {walkLog.Count} шагов. По серому ты прошёл {greyPoints} шагов: это ошибки лаборатории. Новых доступных участков после твоего прохода: {walkLearned}.";
+        WriteJumps(file);
     }
 
     void RecordWalk()
@@ -155,16 +237,18 @@ public class LabController : MonoBehaviour
         if (walkRun.Count > 1) walkLine = LabDraw.Line(ok ? "WalkGood" : "WalkBad", walkRun, ok ? new Color(0.3f, 1f, 0.3f) : new Color(1f, 0.2f, 0.2f), ok ? 0.5f : 0.7f, routeRoot);
     }
 
-    void SaveWalk(int greyPoints)
+    string SaveWalk(int greyPoints)
     {
         var projectDocs = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "..", "Docs", "bots"));
-        var dir = Directory.Exists(projectDocs) ? Path.Combine(projectDocs, "lab_walks") : Path.Combine(Path.GetDirectoryName(Application.dataPath), "LabData", "walks");
+        var dir = Directory.Exists(projectDocs) && !automated ? Path.Combine(projectDocs, "lab_walks") : Path.Combine(Path.GetDirectoryName(Application.dataPath), "LabData", "walks");
         Directory.CreateDirectory(dir);
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"# {map} {System.DateTime.Now:yyyy-MM-dd HH:mm}: {walkLog.Count} steps, {greyPoints} grounded steps on grey, learned {walkLearned}");
         sb.AppendLine("t,x,y,z,grounded,region,reachable");
         foreach (var s in walkLog) sb.AppendLine(string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:F2},{1:F2},{2:F2},{3:F2},{4},{5},{6}", s.t, s.p.x, s.p.y, s.p.z, s.grounded ? 1 : 0, s.region, s.region >= 0 && links.reachable.Contains(s.region) ? 1 : 0));
-        File.WriteAllText(Path.Combine(dir, $"{map}_{System.DateTime.Now:yyyyMMdd_HHmmss}.csv"), sb.ToString());
+        var file = Path.Combine(dir, $"{map}_{System.DateTime.Now:yyyyMMdd_HHmmss}.csv");
+        File.WriteAllText(file, sb.ToString());
+        return file;
     }
 
     IEnumerator Start()
@@ -172,6 +256,7 @@ public class LabController : MonoBehaviour
         while (UIRoot.Instance == null || GameFlow.Instance == null) yield return null;
         yield return new WaitForSeconds(0.5f);
         { var keep = new GameObject("tmp"); Dresser.CreateFighter(keep.transform); Destroy(keep); }   // keep the fighter template for the map scene
+        ShotController.Template();   // and the weapon container of the lobby scene (DontDestroyOnLoad): without it the walker's 7 slots are empty
         var L = UIRoot.Instance.Lobby;
         if (L != null && L.Preview) L.Preview.Active = false;
         UIRoot.Instance.enabled = false;
@@ -362,6 +447,7 @@ public class LabController : MonoBehaviour
         if (markerRoot) markerRoot.gameObject.SetActive(showMarkers);
         if (navObj) navObj.SetActive(showNav);
         if (linksObj) linksObj.SetActive(showLinks);
+        if (walker) { RecordWalk(); TrackAir(); }
         if (automated) return;
         bool overUi = new Rect(0, 0, 380, Screen.height).Contains(new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y));
         if (Input.GetMouseButtonDown(0) && !overUi && !searching && !walker)
@@ -370,7 +456,7 @@ public class LabController : MonoBehaviour
             if (Physics.Raycast(ray, out var hit, 3000f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore)) Pick(hit.point);
         }
         if (Input.GetKeyDown(KeyCode.G)) { if (walker) StopWalk(); else StartWalk(); }
-        if (walker) { RecordWalk(); return; }
+        if (walker) return;
         if (Input.GetKeyDown(KeyCode.Escape)) ClearRoute();
         AnimateFighter(Time.deltaTime * speed);
     }
@@ -438,8 +524,12 @@ public class LabController : MonoBehaviour
         if (!ready) { GUILayout.Label(status, label); GUILayout.EndArea(); return; }
         if (walker)
         {
-            GUILayout.Label("<b>Ты идёшь сам</b> (обычный боец: WASD, мышь, пробел).\nЗелёный след — лаборатория знала, что сюда можно. <color=#ff5555><b>Красный</b></color> — она считала, что нельзя.\n<b>G</b> — закончить и сохранить.", label);
-            GUILayout.EndArea(); return;
+            GUILayout.Label("<b>Ты идёшь сам</b> (обычный боец: WASD, мышь, пробел; оружие 1–7 или колесо, стрельба — левая кнопка; не умираешь).\nЗелёный след — лаборатория знала, что сюда можно. <color=#ff5555><b>Красный</b></color> — она считала, что нельзя. Дуги — твои прыжки.\n<b>G</b> — закончить и сохранить.", label);
+            var cw = ShotController.Instance != null ? ShotController.Instance.CurrentWeapon : null;
+            GUILayout.Label($"В руках: <b>{(cw != null ? cw.SystemName : "—")}</b>\nПрыжков записано: {walkEps.Count}" + (walkEps.Count > 0 ? $" (последний: {LabSim.RuName(walkEps[walkEps.Count - 1].move).ToLowerInvariant()})" : "") + (walkDamage > 0 ? $"\nУрон по тебе (не считается): {walkDamage}" : ""), label);
+            GUILayout.EndArea();
+            GUI.Label(new Rect(Screen.width / 2f - 10f, Screen.height / 2f - 12f, 20f, 24f), "<b>+</b>", big);
+            return;
         }
         if (GUILayout.Button("Пройтись самому (G)", GUILayout.Height(26))) StartWalk();
         if (walkNote != "") GUILayout.Label(walkNote, small);
@@ -550,6 +640,43 @@ public class LabController : MonoBehaviour
         }
     }
 
+    /// <summary>Walk mode with weapons: the fighter put in the air fires the shotgun under himself — the shot must reach the lab and
+    /// push him; then the lab repeats a real shotgun link from the cache as if the owner had made it.</summary>
+    IEnumerator WalkTest()
+    {
+        var spawn = world.markers.First(m => LabWorld.IsSpawn(m.kind) && m.region >= 0);
+        startPt = spawn.position; StartWalk(); startPt = null;
+        yield return new WaitForSeconds(1f);
+        var sc = ShotController.Instance;
+        int slot = sc != null && sc.Weapons != null ? System.Array.FindIndex(sc.Weapons, w => w != null && w.Type == WeaponType.SHOT_GUN) : -1;
+        Log($"{map}: walk test: weapons {(sc != null && sc.Weapons != null ? string.Join(", ", sc.Weapons.Select(w => w == null ? "-" : w.SystemName)) : "none")}, shotgun slot {slot + 1}");
+        if (slot >= 0) sc.SetWeapon(slot + 1);
+        yield return new WaitForSeconds(1.5f);
+        var cc = walker.GetComponent<CharacterController>(); var m = walker.GetComponent<CharacterMotor>();
+        cc.enabled = false; walker.transform.position += Vector3.up * 10f; cc.enabled = true;
+        var look = walker.GetComponent<SoldierCamera>();
+        yield return null; yield return null;
+        if (look) look.SetPitch(80f);   // + = down (SoldierCamera: y -= mouse Y)
+        var before = m.movement.velocity; ShotController.TestFire = true;
+        yield return new WaitForSeconds(0.1f);
+        ShotController.TestFire = false;
+        var after = m.movement.velocity;
+        Log($"{map}: walk test: held {Held}, airborne {!m.grounded}, episode shotgun shots {(curEp != null ? curEp.shotgun : -1)}, velocity {before} -> {after}");
+        yield return new WaitForSeconds(3f);
+        StopWalk();
+        Log($"{map}: walk test: {walkNote.Replace("\n", " | ")}; episodes: {string.Join("; ", walkEps.Select(e => $"{e.move} shots {e.shotgun} {e.result}"))}");
+        // the lab repeats a real shotgun link of the cache from its ends, as if the owner had made it
+        var probe = links.links.FirstOrDefault(l => l.move == LabSim.Move.Shotgun && !l.taught && l.fromRegion != l.toRegion && l.rise > 4f);
+        if (probe != null)
+        {
+            LabLinks.Link got = null; string why = "";
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            yield return links.Reproduce(probe.from, probe.to, LabSim.Move.Shotgun, (l, w) => { got = l; why = w; });
+            Log($"{map}: reproduce test: shotgun {probe.from} -> {probe.to} (+{probe.rise:F1}, {probe.time:F2} s, {probe.Params().Recipe()}): {(got != null ? $"{got.move} {got.Params().Recipe()} lands {got.to}, {got.time:F2} s" : "none")}; {why}; {sw.Elapsed.TotalSeconds:F1} s");
+            if (got != null) links.Forget(got);
+        }
+    }
+
     IEnumerator AutoTest()
     {
         Log($"=== {map}: walk grid {world.cellCount} cells of {LabWorld.Cell}×{LabWorld.Cell} ({world.columns} columns), {world.regionCount} regions, built in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
@@ -643,5 +770,6 @@ public class LabController : MonoBehaviour
         }
         ClearRoute();
         Log($"{map}: done");
+        yield return WalkTest();
     }
 }
