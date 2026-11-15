@@ -11,7 +11,7 @@ public class UITest : MonoBehaviour
     static void Boot()
     {
         var args = System.Environment.GetCommandLineArgs();
-        if (!args.Contains("-uitest") && !args.Contains("-tooltips") && !args.Contains("-uicompare")) return;
+        if (!args.Contains("-uitest") && !args.Contains("-tooltips") && !args.Contains("-uicompare") && !args.Contains("-motortest")) return;
         var go = new GameObject("UITest"); DontDestroyOnLoad(go); go.AddComponent<UITest>();
     }
 
@@ -26,6 +26,7 @@ public class UITest : MonoBehaviour
         var ui = UIRoot.Instance; var L = ui.Lobby;
         if (System.Environment.GetCommandLineArgs().Contains("-tooltips")) { yield return Tooltips(L); Application.Quit(); yield break; }
         if (System.Environment.GetCommandLineArgs().Contains("-uicompare")) { yield return Compare(ui, L); Application.Quit(); yield break; }
+        if (System.Environment.GetCommandLineArgs().Contains("-motortest")) { yield return MotorTraceTest.Run(dir); Application.Quit(); yield break; }
         Profile.ResetProfile();
         L.mainTab = 0; yield return Shot("lobby_home");
         foreach (var (clip, t) in new[] { ("Idle", 0f), ("Idle", 0.5f), ("IdleLong", 0f), ("IdleLong", 0.3f), ("IdleLong", 0.6f) })

@@ -139,7 +139,7 @@ Pilot: Комиссариат, DM. Stage letters of the first draft (A, B0–B5,
 
 | # | Step | Done when |
 |---|---|---|
-| 1 | **Simulatable motor:** CharacterMotor takes its time step and input from outside, same maths | replayed recorded input gives the same path 1:1 |
+| 1 | **Simulatable motor:** CharacterMotor takes its time step and input from outside, same maths | replayed recorded input gives the same path 1:1 — **done 15.11.2026** (`step1_motor.md`) |
 | 2 | **Lab base:** load the map, fly camera, existing markers (spawns, pickups, flags), walkable surface for the fighter size, single experiments (put a bot, pick a move, see the trajectory) | the owner can try a jump from any spot |
 | 3 | **Replays:** a match or a run saved as data, played back with a timeline (kills / deaths marked), speed, scrub, free or follow camera | a recorded run plays back exactly |
 | 4 | **Movement search:** jump, bunnyhop, shotgun jump and shotgun chains, rocket jump, bat; sweeps of angles and timings; the overview map with arcs | **owner checks realism** |

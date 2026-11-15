@@ -2,6 +2,9 @@
 // reference). Base = New Era by the owner's decision (2026-11-11). Keyboard input → CharacterMotor; also the key state of
 // PlayerLocal.ReadKeyboardInput (NE PlayerLocal.cs:118-187) that drives FPSCamera.Walk and the body animation / footsteps.
 // Dropped: anti-cheat (lstccounter, CheckSpeedMultiplier → SendEnterBaseRequest), chat typing reset (no battle chat yet).
+// Rebuild (bots step 1, 15.11.2026): the keyboard is read into a Keys value and Step(keys, dt, now) does the rest with the given
+// frame time and clock, so a bot or a simulation can drive the same code. For the player Update reads the keyboard and calls
+// Step(keys, Time.deltaTime, Time.time): identical behaviour.
 using UnityEngine;
 
 /// <summary>PlayerLocal keyState (嗧).</summary>
@@ -46,6 +49,28 @@ public class SoldierController : MonoBehaviour
     FPSCamera fpsCamera;
     float horizontalAxis, verticalAxis;
 
+    /// <summary>One frame of controls. left/right/up/down: any movement key (arrows, WASD, the bound keys); bound*: the bound keys
+    /// only (PlayerLocal.ReadKeyboardInput uses them for the key state). A bot sets both the same (Keys.Moves).</summary>
+    public struct Keys
+    {
+        public bool left, right, up, down, boundLeft, boundRight, boundForward, boundBack;
+        public bool jump, crouch, shift, fire, aim;
+        public static Keys Moves(bool left, bool right, bool up, bool down) => new Keys { left = left, right = right, up = up, down = down, boundLeft = left, boundRight = right, boundForward = up, boundBack = down };
+    }
+
+    /// <summary>Stepped by its owner (simulation / bot) instead of Update.</summary>
+    [System.NonSerialized] public bool externallyStepped;
+    /// <summary>A simulated fighter: no UI, no sounds; the weapon speed comes from simWeaponSpeedMultiplier / simHasWeapon.</summary>
+    [System.NonSerialized] public bool simulated;
+    [System.NonSerialized] public float simWeaponSpeedMultiplier = 1f;
+    [System.NonSerialized] public bool simHasWeapon;
+    /// <summary>Automated tests: keys used instead of the keyboard while set.</summary>
+    [System.NonSerialized] public Keys? testKeys;
+    /// <summary>The keys of the last step.</summary>
+    [System.NonSerialized] public Keys lastKeys;
+    /// <summary>Recording hook (MotorTrace): called at the start of every Step with (controller, keys, dt, now).</summary>
+    [System.NonSerialized] public System.Action<SoldierController, Keys, float, float> OnStep;
+
     void Awake() { motor = GetComponent<CharacterMotor>(); }
 
     void Start()
@@ -82,9 +107,34 @@ public class SoldierController : MonoBehaviour
     // NE :403-549
     void Update()
     {
-        if (motor == null) return;
+        if (motor == null || externallyStepped) return;
         if (UIRoot.Instance != null && UIRoot.Instance.Battle != null && UIRoot.Instance.Battle.MenuOpen) return;   // NE :449-452 GameHUD.IsShowMenu: the last input stays
-        GetUserInputs();
+        Step(testKeys ?? ReadKeys(), Time.deltaTime, Time.time);
+    }
+
+    /// <summary>The keyboard as NE GetUserInputs (:551-641) and PlayerLocal.ReadKeyboardInput read it.</summary>
+    static Keys ReadKeys() => new Keys
+    {
+        left = Input.GetKey(KeyCode.LeftArrow) || Input.GetKey(KeyCode.A) || Input.GetKey(TRInput.LeftStrafe),
+        right = Input.GetKey(KeyCode.RightArrow) || Input.GetKey(KeyCode.D) || Input.GetKey(TRInput.RightStrafe),
+        up = Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.W) || Input.GetKey(TRInput.Forward),
+        down = Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.S) || Input.GetKey(TRInput.Backward),
+        boundLeft = Input.GetKey(TRInput.LeftStrafe), boundRight = Input.GetKey(TRInput.RightStrafe),
+        boundForward = Input.GetKey(TRInput.Forward), boundBack = Input.GetKey(TRInput.Backward),
+        jump = Input.GetKey(TRInput.Jump),
+        crouch = Input.GetKey(TRInput.Crouch),
+        shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift),
+        fire = Input.GetButton("Fire1") || Input.GetKey(TRInput.Fire1),
+        aim = Input.GetButton("Fire2") || Input.GetKey(KeyCode.Mouse1),
+    };
+
+    /// <summary>One controller update from the given keys, frame time and clock.</summary>
+    public void Step(Keys k, float dt, float now)
+    {
+        if (motor == null) motor = GetComponent<CharacterMotor>();
+        OnStep?.Invoke(this, k, dt, now);
+        lastKeys = k;
+        GetUserInputs(k, dt);
         if (!motor.canControl) motor.canControl = true;
         if (!dead)
         {
@@ -93,7 +143,7 @@ public class SoldierController : MonoBehaviour
         else { moveDir = Vector3.zero; motor.canControl = false; }
         if (moveDir.sqrMagnitude > 1f) moveDir = moveDir.normalized;
         motor.inputMoveDirection = transform.TransformDirection(moveDir);
-        motor.inputJump = (Input.GetKey(TRInput.Jump) || testJump) && !crouch;
+        motor.inputJump = (k.jump || testJump) && !crouch;
         var m = motor.movement;
         m.maxForwardSpeed = !walk ? (crouch ? crouchRunSpeed : runSpeed) : (crouch ? crouchWalkSpeed : walkSpeed);
         float strafe = !walk ? (crouch ? crouchRunStrafeSpeed : runStrafeSpeed) : (crouch ? crouchWalkStrafeSpeed : walkStrafeSpeed);
@@ -116,9 +166,9 @@ public class SoldierController : MonoBehaviour
             m.maxBackwardsSpeed = m.maxForwardSpeed;
             m.maxSidewaysSpeed = strafe;
             // NE :521-531 — ShotController.GetSpeedMultiplier (CheckSpeedMultiplier = anti-cheat report, dropped)
-            var shots = ShotController.Instance;
-            weaponSpeedMultiplier = shots != null ? shots.GetSpeedMultiplier() : 1f;
-            hasWeapon = shots != null && shots.CurrentWeapon != null;
+            var shots = simulated ? null : ShotController.Instance;
+            weaponSpeedMultiplier = simulated ? simWeaponSpeedMultiplier : shots != null ? shots.GetSpeedMultiplier() : 1f;
+            hasWeapon = simulated ? simHasWeapon : shots != null && shots.CurrentWeapon != null;
             if (hasWeapon && weaponSpeedMultiplier != 1f)
             {
                 m.maxForwardSpeed *= weaponSpeedMultiplier; m.maxBackwardsSpeed *= weaponSpeedMultiplier; m.maxSidewaysSpeed *= weaponSpeedMultiplier;
@@ -131,14 +181,14 @@ public class SoldierController : MonoBehaviour
         if (fpsCamera) fpsCamera.Croach = crouch;                       // PlayerLocal: SetCrouch → fpsCamera.Croach
         if (moveDir != Vector3.zero) idleTimer = 0f;
         bool air = !motor.grounded;
-        inAirSeconds = air ? inAirSeconds + Time.deltaTime : 0f;
-        if (air != inAir) { inAir = air; lastAir = Time.time; }         // NE :537-543
-        else if (inAir && Time.time - lastAir > 1.7f)                    // NE :544-548 EffectManager.FallDownEffect
+        inAirSeconds = air ? inAirSeconds + dt : 0f;
+        if (air != inAir) { inAir = air; lastAir = now; }         // NE :537-543
+        else if (inAir && now - lastAir > 1.7f)                          // NE :544-548 EffectManager.FallDownEffect
         {
-            SoundManager.Play(SoundManager.LocalPlayerAudio, "FallDown", AudioPlayMode.Play);
-            lastAir = Time.time;
+            if (!simulated) SoundManager.Play(SoundManager.LocalPlayerAudio, "FallDown", AudioPlayMode.Play);
+            lastAir = now;
         }
-        ReadKeyboardInput();
+        ReadKeyboardInput(k);
     }
 
     /// <summary>NE GetZombieJumpHeight (:651-674): 6.5, «Zombi» 6, «Zombi_2» 7.</summary>
@@ -151,20 +201,17 @@ public class SoldierController : MonoBehaviour
     }
 
     /// <summary>NE ColleagueAxisAccel (:721-727): per-frame axis step, frame-rate scaled only above 250 fps.</summary>
-    static float ColleagueAxisAccel(float a)
+    static float ColleagueAxisAccel(float a, float dt)
     {
-        float n = Time.deltaTime * 250f;
+        float n = dt * 250f;
         return n >= 1f ? a : a * Mathf.Max(n, 0.05f);
     }
 
     // NE :551-641
-    void GetUserInputs()
+    void GetUserInputs(Keys k, float dt)
     {
-        bool left = Input.GetKey(KeyCode.LeftArrow) || Input.GetKey(KeyCode.A) || Input.GetKey(TRInput.LeftStrafe);
-        bool right = Input.GetKey(KeyCode.RightArrow) || Input.GetKey(KeyCode.D) || Input.GetKey(TRInput.RightStrafe);
-        bool up = Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.W) || Input.GetKey(TRInput.Forward);
-        bool down = Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.S) || Input.GetKey(TRInput.Backward);
-        float d = ColleagueAxisAccel(customAxisAcceleration);
+        bool left = k.left, right = k.right, up = k.up, down = k.down;
+        float d = ColleagueAxisAccel(customAxisAcceleration, dt);
         if (left && !right) { if (horizontalAxis > 0f) horizontalAxis = 0f; horizontalAxis = Mathf.MoveTowards(horizontalAxis, -1f, d); }
         else if (right && !left) { if (horizontalAxis < 0f) horizontalAxis = 0f; horizontalAxis = Mathf.MoveTowards(horizontalAxis, 1f, d); }
         else horizontalAxis = Mathf.MoveTowards(horizontalAxis, 0f, d);
@@ -173,23 +220,23 @@ public class SoldierController : MonoBehaviour
         else verticalAxis = Mathf.MoveTowards(verticalAxis, 0f, d);
         horizontalAxis = Mathf.Clamp(horizontalAxis, -1f, 1f);
         verticalAxis = Mathf.Clamp(verticalAxis, -1f, 1f);
-        fire = (Input.GetButton("Fire1") || Input.GetKey(TRInput.Fire1)) && !dead;
-        aim = (Input.GetButton("Fire2") || Input.GetKey(KeyCode.Mouse1)) && !dead;
-        idleTimer += Time.deltaTime;
+        fire = k.fire && !dead;
+        aim = k.aim && !dead;
+        idleTimer += dt;
         if (aim || fire) idleTimer = 0f;
-        bool crouchNow = Input.GetKey(TRInput.Crouch);
+        bool crouchNow = k.crouch;
         if (crouchNow != crouch) idleTimer = 0f;                         // NE :473-478 (SetCrouch)
         crouch = crouchNow || dead;
         bool moving = horizontalAxis != 0f || verticalAxis != 0f || testMove != Vector3.zero;
-        bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+        bool shift = k.shift;
         walk = (shift && moving && !dead) || !moving || crouch || weaponForcesWalk;
     }
 
     /// <summary>PlayerLocal.ReadKeyboardInput (NE PlayerLocal.cs:118-187): bound keys only, opposite keys cancel, priority
     /// right › left › forward › back; FPSCamera.Walk = one of them is held (the crouch eye height 4.7 vs 5.2 depends on it).</summary>
-    void ReadKeyboardInput()
+    void ReadKeyboardInput(Keys k)
     {
-        bool r = Input.GetKey(TRInput.RightStrafe), l = Input.GetKey(TRInput.LeftStrafe), f = Input.GetKey(TRInput.Forward), b = Input.GetKey(TRInput.Backward);
+        bool r = k.boundRight, l = k.boundLeft, f = k.boundForward, b = k.boundBack;
         if (testMove != Vector3.zero) { r = testMove.x > 0f; l = testMove.x < 0f; f = testMove.z > 0f; b = testMove.z < 0f; }
         bool held = true;
         if (r && !l) keyState = walk ? KeyState.WalkStrafeRight : KeyState.RunStrafeRight;
@@ -198,6 +245,38 @@ public class SoldierController : MonoBehaviour
         else if (b && !f) keyState = walk ? KeyState.WalkBack : KeyState.RuningBack;
         else { keyState = KeyState.Still; held = false; }
         if (fpsCamera) fpsCamera.Walk = held;
+    }
+
+    /// <summary>Everything the next Step reads besides the keys and the speed settings (simulation, replays).</summary>
+    public struct State
+    {
+        public float horizontalAxis, verticalAxis, idleTimer, inAirSeconds, lastAir;
+        public bool walk, crouch, inAir, aim, fire, dead;
+        public Vector3 moveDir; public KeyState keyState;
+        public float impactSpeedMultiplier; public bool weaponForcesWalk;
+    }
+
+    public State CaptureState() => new State
+    {
+        horizontalAxis = horizontalAxis, verticalAxis = verticalAxis, idleTimer = idleTimer, inAirSeconds = inAirSeconds, lastAir = lastAir,
+        walk = walk, crouch = crouch, inAir = inAir, aim = aim, fire = fire, dead = dead, moveDir = moveDir, keyState = keyState,
+        impactSpeedMultiplier = impactSpeedMultiplier, weaponForcesWalk = weaponForcesWalk,
+    };
+
+    public void RestoreState(State s)
+    {
+        horizontalAxis = s.horizontalAxis; verticalAxis = s.verticalAxis; idleTimer = s.idleTimer; inAirSeconds = s.inAirSeconds; lastAir = s.lastAir;
+        walk = s.walk; crouch = s.crouch; inAir = s.inAir; aim = s.aim; fire = s.fire; dead = s.dead; moveDir = s.moveDir; keyState = s.keyState;
+        impactSpeedMultiplier = s.impactSpeedMultiplier; weaponForcesWalk = s.weaponForcesWalk;
+    }
+
+    /// <summary>Copies the speed settings (the ForceBattleMovementValues result) from another controller.</summary>
+    public void CopySettingsFrom(SoldierController o)
+    {
+        runSpeed = o.runSpeed; runStrafeSpeed = o.runStrafeSpeed; walkSpeed = o.walkSpeed; walkStrafeSpeed = o.walkStrafeSpeed;
+        crouchRunSpeed = o.crouchRunSpeed; crouchRunStrafeSpeed = o.crouchRunStrafeSpeed; crouchWalkSpeed = o.crouchWalkSpeed;
+        crouchWalkStrafeSpeed = o.crouchWalkStrafeSpeed; customAxisAcceleration = o.customAxisAcceleration;
+        isZombie = o.isZombie; isZombieBoss = o.isZombieBoss;
     }
 
     /// <summary>ActorAnimator.IsRunning: the four run key states.</summary>

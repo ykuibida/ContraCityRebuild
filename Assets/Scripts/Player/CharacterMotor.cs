@@ -6,6 +6,10 @@
 // Dropped: anti-cheat (喰 motorSecurity, Check, lstccounter), moving platforms (prefab movingPlatform.enabled = 0),
 // remote-head support (:1077, needs other players), pit kill zone (:756 stub returns false).
 // Values = the original fighter prefab Fighter_locomotion (gravity 60, maxFallSpeed 400, useFixedUpdate 0).
+// Rebuild (bots step 1, 15.11.2026): the frame time and clock come in through Step(dt, now) instead of Time.deltaTime / Time.time,
+// so the same maths can run many times per frame for simulated fighters (MotorTrace, the map lab). For the player Update calls
+// Step(Time.deltaTime, Time.time): identical values, identical behaviour. CaptureState / RestoreState snapshot every field the
+// next step reads.
 using System;
 using UnityEngine;
 
@@ -78,6 +82,19 @@ public class CharacterMotor : MonoBehaviour
     PlayerVitals vitals;
     SoldierController soldier;
 
+    /// <summary>Physics layer of simulated fighters: collides with the map like the player (layer 2) but not with the player or each other.</summary>
+    public const int GhostLayer = 27;
+    /// <summary>Stepped by its owner (simulation) instead of Update.</summary>
+    [NonSerialized] public bool externallyStepped;
+    /// <summary>A simulated fighter: no UI hooks, no round lock, no input reset; the bat air-speed factor comes from <see cref="simBatAirFactor"/>.</summary>
+    [NonSerialized] public bool simulated;
+    [NonSerialized] public float simBatAirFactor = 1.25f;
+    /// <summary>Recording hooks (MotorTrace): before and after every Step.</summary>
+    [NonSerialized] public Action<CharacterMotor> OnBeforeStep, OnAfterStep;
+    float dt, now;   // the current step's frame time and clock (Time.deltaTime / Time.time for the player)
+    public float LastDt => dt;
+    public float LastNow => now;
+
     /// <summary>NE IsRoundIntermissionMovementLocked: GameHUD state TimeOver / TimeOverReady / RoundStarting (set by BattleUI).</summary>
     public static Func<bool> RoundIntermissionLocked;
     /// <summary>NE GameHUD.CheatMessagePersistent (under-map warning, "cheat_msg"), set by BattleUI.</summary>
@@ -93,14 +110,39 @@ public class CharacterMotor : MonoBehaviour
 
     bool Dead => vitals != null && vitals.Dead;
 
-    void Update() { if (!useFixedUpdate) UpdateFunction(); }
-    void FixedUpdate() { if (useFixedUpdate) UpdateFunction(); }
+    void Update() { if (!useFixedUpdate && !externallyStepped) Step(Time.deltaTime, Time.time); }
+    void FixedUpdate() { if (useFixedUpdate && !externallyStepped) Step(Time.deltaTime, Time.time); }
+
+    /// <summary>One motor update with the given frame time and clock (seconds).</summary>
+    public void Step(float deltaTime, float time)
+    {
+        if (controller == null) Awake();
+        dt = deltaTime; now = time;
+        OnBeforeStep?.Invoke(this);
+        UpdateFunction();
+        OnAfterStep?.Invoke(this);
+    }
+
+    /// <summary>Copies the tuning (prefab values and what SoldierController.ForceBattleMovementValues set) from another motor.</summary>
+    public void CopySettingsFrom(CharacterMotor o)
+    {
+        var a = movement; var b = o.movement;
+        a.maxForwardSpeed = b.maxForwardSpeed; a.maxSidewaysSpeed = b.maxSidewaysSpeed; a.maxBackwardsSpeed = b.maxBackwardsSpeed;
+        a.clampSpeedOnSlopes = b.clampSpeedOnSlopes; a.maxSpeedOnSlope = b.maxSpeedOnSlope;
+        a.maxGroundAcceleration = b.maxGroundAcceleration; a.maxGroundDecceration = b.maxGroundDecceration;
+        a.maxAirAcceleration = b.maxAirAcceleration; a.maxAirDecceration = b.maxAirDecceration;
+        a.gravity = b.gravity; a.maxFallSpeed = b.maxFallSpeed;
+        jumping.enabled = o.jumping.enabled; jumping.baseHeight = o.jumping.baseHeight; jumping.extraHeight = o.jumping.extraHeight;
+        jumping.perpAmount = o.jumping.perpAmount; jumping.steepPerpAmount = o.jumping.steepPerpAmount;
+        sliding.enabled = o.sliding.enabled; sliding.slidingSpeed = o.sliding.slidingSpeed; sliding.sidewaysControl = o.sliding.sidewaysControl; sliding.speedControl = o.sliding.speedControl;
+        canControl = o.canControl; useFixedUpdate = o.useFixedUpdate; explosionSpeed = o.explosionSpeed;
+    }
 
     // NE :245-391
     void UpdateFunction()
     {
         if (Dead) { ResetLocalFallTracking(); return; }                          // NE :259-263 (Penta :271 too)
-        if (RoundIntermissionLocked != null && RoundIntermissionLocked())        // NE :264-277
+        if (!simulated && RoundIntermissionLocked != null && RoundIntermissionLocked())        // NE :264-277
         {
             inputMoveDirection = Vector3.zero; inputJump = false;
             movement.velocity = Vector3.zero; movement.frameVelocity = Vector3.zero; explosionForce = Vector3.zero;
@@ -115,7 +157,7 @@ public class CharacterMotor : MonoBehaviour
         velocity = ClampLocalAirSpeedToBatRunSpeedLimit(velocity);
         UpdateLocalFallTrackingWhileAirborne();
 
-        Vector3 motion = velocity * Time.deltaTime;
+        Vector3 motion = velocity * dt;
         float pushDown = Mathf.Max(controller.stepOffset, new Vector3(motion.x, 0f, motion.z).magnitude);
         if (grounded) motion -= pushDown * Vector3.up;
         groundNormal = Vector3.zero;
@@ -155,7 +197,7 @@ public class CharacterMotor : MonoBehaviour
         if (grounded) desired = ColleagueGroundVelocity(desired, groundNormal);
         else velocity.y = 0f;
         Vector3 change = desired - velocity;
-        float max = GetMaxAcceleration(grounded, desired.sqrMagnitude - velocity.sqrMagnitude) * Time.deltaTime;
+        float max = GetMaxAcceleration(grounded, desired.sqrMagnitude - velocity.sqrMagnitude) * dt;
         if (change.sqrMagnitude > max * max) change = change.normalized * max;
         if (grounded || canControl) velocity += change;
         if (grounded) velocity.y = Mathf.Min(velocity.y, 0f);
@@ -178,11 +220,7 @@ public class CharacterMotor : MonoBehaviour
     {
         if (grounded || (soldier != null && soldier.isZombie)) return v;
         float run = soldier != null && soldier.runSpeed > 0.01f ? soldier.runSpeed : 16.119999f;
-        float k = 1.25f;   // NE :898-910: Mathf.Max(1, bat.SpeedValue) × 1.25 when the baseball bat is in the weapon set
-        var shots = ShotController.Instance;
-        if (shots != null && shots.Weapons != null)
-            foreach (var w in shots.Weapons)
-                if (w != null && string.Equals(w.SystemName, "OHCA_BasebalBat", System.StringComparison.OrdinalIgnoreCase)) { k = Mathf.Max(1f, w.SpeedValue) * 1.25f; break; }
+        float k = BatAirFactor();
         float limit = Mathf.Max(0.1f, run * k * 2.7f);
         float sq = v.x * v.x + v.z * v.z;
         if (sq <= limit * limit) return v;
@@ -190,6 +228,18 @@ public class CharacterMotor : MonoBehaviour
         if (m <= 0.0001f) return v;
         v.x *= limit / m; v.z *= limit / m;
         return v;
+    }
+
+    /// <summary>NE :898-910: Mathf.Max(1, bat.SpeedValue) × 1.25 when the baseball bat is in the weapon set, else 1.25.</summary>
+    public float BatAirFactor()
+    {
+        if (simulated) return simBatAirFactor;
+        float k = 1.25f;
+        var shots = ShotController.Instance;
+        if (shots != null && shots.Weapons != null)
+            foreach (var w in shots.Weapons)
+                if (w != null && string.Equals(w.SystemName, "OHCA_BasebalBat", System.StringComparison.OrdinalIgnoreCase)) { k = Mathf.Max(1f, w.SpeedValue) * 1.25f; break; }
+        return k;
     }
 
     /// <summary>NE Reset (:930-943).</summary>
@@ -200,7 +250,7 @@ public class CharacterMotor : MonoBehaviour
         movement.frameVelocity = Vector3.zero;
         hasUnderMapPreviousPosition = false; hasLastSafeGroundY = false; hasLastSafeGroundPosition = false;
         nextUnderMapGeometryCheckTime = 0f; nextUnderMapRecoveryTime = 0f;
-        Input.ResetInputAxes();
+        if (!simulated) Input.ResetInputAxes();
     }
 
     /// <summary>NE SetExplosionForce (:944-950).</summary>
@@ -213,22 +263,22 @@ public class CharacterMotor : MonoBehaviour
     Vector3 ApplyGravityAndJumping(Vector3 v)
     {
         if (!inputJump || !canControl) { jumping.holdingJumpButton = false; jumping.lastButtonDownTime = -100f; }
-        if (inputJump && jumping.lastButtonDownTime < 0f && canControl) jumping.lastButtonDownTime = Time.time;
-        if (grounded) v.y = Mathf.Min(0f, v.y) - movement.gravity * Time.deltaTime;
+        if (inputJump && jumping.lastButtonDownTime < 0f && canControl) jumping.lastButtonDownTime = now;
+        if (grounded) v.y = Mathf.Min(0f, v.y) - movement.gravity * dt;
         else
         {
-            v.y = movement.velocity.y - movement.gravity * Time.deltaTime;
-            if (jumping.jumping && jumping.holdingJumpButton && Time.time < jumping.lastStartTime + jumping.extraHeight / CalculateJumpVerticalSpeed(jumping.baseHeight))
-                v += jumping.jumpDir * movement.gravity * Time.deltaTime;
+            v.y = movement.velocity.y - movement.gravity * dt;
+            if (jumping.jumping && jumping.holdingJumpButton && now < jumping.lastStartTime + jumping.extraHeight / CalculateJumpVerticalSpeed(jumping.baseHeight))
+                v += jumping.jumpDir * movement.gravity * dt;
             v.y = Mathf.Max(v.y, -movement.maxFallSpeed);
         }
         if (grounded)
         {
-            if (jumping.enabled && canControl && Time.time - jumping.lastButtonDownTime < 0.2)
+            if (jumping.enabled && canControl && now - jumping.lastButtonDownTime < 0.2)
             {
                 grounded = false;
                 jumping.jumping = true;
-                jumping.lastStartTime = Time.time;
+                jumping.lastStartTime = now;
                 jumping.lastButtonDownTime = -100f;
                 jumping.holdingJumpButton = true;
                 jumping.jumpDir = TooSteep() ? Vector3.Slerp(Vector3.up, groundNormal, jumping.steepPerpAmount) : Vector3.Slerp(Vector3.up, groundNormal, jumping.perpAmount);
@@ -292,7 +342,7 @@ public class CharacterMotor : MonoBehaviour
         right /= Mathf.Sqrt(sq);
         float d = Vector3.Dot(v, right);
         float sign = d > 0.1f ? 1f : d < -0.1f ? -1f : 0f;
-        float time = Time.time;
+        float time = now;
         if (sign == 0f) { strafeSustainSign = 0f; return v; }
         if (sign != strafeSustainSign) { strafeSustainSign = sign; strafeSustainSince = time; }
         float t = time - strafeSustainSince - 0.18f;
@@ -320,9 +370,63 @@ public class CharacterMotor : MonoBehaviour
         return new Vector3(n.x, 0f, n.z * z).magnitude * movement.maxSidewaysSpeed;
     }
 
+    // ---------------- state snapshot (rebuild: simulation, replays, lab experiments) ----------------
+    /// <summary>Everything the next Step reads, apart from the inputs (inputMoveDirection, inputJump, speeds, explosionForce).</summary>
+    public struct State
+    {
+        public Vector3 position; public Quaternion rotation;
+        public Vector3 velocity, frameVelocity, hitPoint, lastHitPoint;
+        public CollisionFlags collisionFlags;
+        public bool grounded; public Vector3 groundNormal, lastGroundNormal, explosionForce;
+        public bool jumpingNow, holdingJumpButton; public float lastStartTime, lastButtonDownTime; public Vector3 jumpDir;
+        public float strafeSustainSign, strafeSustainSince;
+        public bool fallTrackingActive; public float fallPeakY, fallStartTime, fallMaxDownSpeed;
+        public bool hasUnderMapPreviousPosition, hasLastSafeGroundY, hasLastSafeGroundPosition, underMapWarningShown;
+        public Vector3 underMapPreviousPosition, lastSafeGroundPosition; public float lastSafeGroundY;
+        public float nextUnderMapGeometryCheckTime, nextUnderMapWarningCheckTime, nextUnderMapRecoveryTime;
+    }
+
+    public State CaptureState() => new State
+    {
+        position = transform.position, rotation = transform.rotation,
+        velocity = movement.velocity, frameVelocity = movement.frameVelocity, hitPoint = movement.hitPoint, lastHitPoint = movement.lastHitPoint,
+        collisionFlags = movement.collisionFlags,
+        grounded = grounded, groundNormal = groundNormal, lastGroundNormal = lastGroundNormal, explosionForce = explosionForce,
+        jumpingNow = jumping.jumping, holdingJumpButton = jumping.holdingJumpButton, lastStartTime = jumping.lastStartTime,
+        lastButtonDownTime = jumping.lastButtonDownTime, jumpDir = jumping.jumpDir,
+        strafeSustainSign = strafeSustainSign, strafeSustainSince = strafeSustainSince,
+        fallTrackingActive = fallTrackingActive, fallPeakY = fallPeakY, fallStartTime = fallStartTime, fallMaxDownSpeed = fallMaxDownSpeed,
+        hasUnderMapPreviousPosition = hasUnderMapPreviousPosition, hasLastSafeGroundY = hasLastSafeGroundY,
+        hasLastSafeGroundPosition = hasLastSafeGroundPosition, underMapWarningShown = underMapWarningShown,
+        underMapPreviousPosition = underMapPreviousPosition, lastSafeGroundPosition = lastSafeGroundPosition, lastSafeGroundY = lastSafeGroundY,
+        nextUnderMapGeometryCheckTime = nextUnderMapGeometryCheckTime, nextUnderMapWarningCheckTime = nextUnderMapWarningCheckTime,
+        nextUnderMapRecoveryTime = nextUnderMapRecoveryTime,
+    };
+
+    public void RestoreState(State s)
+    {
+        if (controller == null) Awake();
+        bool en = controller.enabled;
+        if (en) controller.enabled = false;           // teleport without a sweep
+        transform.SetPositionAndRotation(s.position, s.rotation);
+        if (en) controller.enabled = true;
+        movement.velocity = s.velocity; movement.frameVelocity = s.frameVelocity; movement.hitPoint = s.hitPoint; movement.lastHitPoint = s.lastHitPoint;
+        movement.collisionFlags = s.collisionFlags;
+        grounded = s.grounded; groundNormal = s.groundNormal; lastGroundNormal = s.lastGroundNormal; explosionForce = s.explosionForce;
+        jumping.jumping = s.jumpingNow; jumping.holdingJumpButton = s.holdingJumpButton; jumping.lastStartTime = s.lastStartTime;
+        jumping.lastButtonDownTime = s.lastButtonDownTime; jumping.jumpDir = s.jumpDir;
+        strafeSustainSign = s.strafeSustainSign; strafeSustainSince = s.strafeSustainSince;
+        fallTrackingActive = s.fallTrackingActive; fallPeakY = s.fallPeakY; fallStartTime = s.fallStartTime; fallMaxDownSpeed = s.fallMaxDownSpeed;
+        hasUnderMapPreviousPosition = s.hasUnderMapPreviousPosition; hasLastSafeGroundY = s.hasLastSafeGroundY;
+        hasLastSafeGroundPosition = s.hasLastSafeGroundPosition; underMapWarningShown = s.underMapWarningShown;
+        underMapPreviousPosition = s.underMapPreviousPosition; lastSafeGroundPosition = s.lastSafeGroundPosition; lastSafeGroundY = s.lastSafeGroundY;
+        nextUnderMapGeometryCheckTime = s.nextUnderMapGeometryCheckTime; nextUnderMapWarningCheckTime = s.nextUnderMapWarningCheckTime;
+        nextUnderMapRecoveryTime = s.nextUnderMapRecoveryTime;
+    }
+
     // ---------------- local fall damage (NE :602-710, offline path → PlayerManager.ApplyLocalFallDamage) ----------------
     bool fallTrackingActive; float fallPeakY, fallStartTime, fallMaxDownSpeed;
-    void BeginLocalFallTracking() { fallTrackingActive = true; fallPeakY = tr.position.y; fallStartTime = Time.time; fallMaxDownSpeed = 0f; }
+    void BeginLocalFallTracking() { fallTrackingActive = true; fallPeakY = tr.position.y; fallStartTime = now; fallMaxDownSpeed = 0f; }
     void UpdateLocalFallTrackingWhileAirborne()
     {
         if (grounded) return;
@@ -333,7 +437,7 @@ public class CharacterMotor : MonoBehaviour
     void ResetLocalFallTracking() { fallTrackingActive = false; fallPeakY = 0f; fallStartTime = 0f; fallMaxDownSpeed = 0f; }
     void ReportLocalFallDamageOnLand()
     {
-        if (!fallTrackingActive || Time.time - fallStartTime < 0.45f || vitals == null || Dead) return;
+        if (!fallTrackingActive || now - fallStartTime < 0.45f || vitals == null || Dead) return;
         float h = Mathf.Max(0f, fallPeakY - tr.position.y);
         int d = h < 30f || fallMaxDownSpeed < 18f ? 0 : h >= 60f ? 80 : 40;   // CalculateLocalFallDamage (:653-660)
         if (d <= 0 || (soldier != null && soldier.isZombie)) return;          // ReportLocalFallDamage (:685-709): zombies skip
@@ -357,17 +461,17 @@ public class CharacterMotor : MonoBehaviour
             if (grounded) { lastSafeGroundY = p.y; lastSafeGroundPosition = p; hasLastSafeGroundY = hasLastSafeGroundPosition = true; }
             return;
         }
-        if (underMapWarningShown) { UnderMapWarning?.Invoke(); return; }
+        if (underMapWarningShown) { if (!simulated) UnderMapWarning?.Invoke(); return; }
         if (grounded)
         {
             lastSafeGroundY = p.y; lastSafeGroundPosition = p; hasLastSafeGroundY = hasLastSafeGroundPosition = true;
-            underMapPreviousPosition = p; nextUnderMapGeometryCheckTime = Time.time + 0.1f;
+            underMapPreviousPosition = p; nextUnderMapGeometryCheckTime = now + 0.1f;
             return;
         }
-        if (Time.time >= nextUnderMapGeometryCheckTime)
+        if (now >= nextUnderMapGeometryCheckTime)
         {
             Vector3 a = underMapPreviousPosition;
-            underMapPreviousPosition = p; nextUnderMapGeometryCheckTime = Time.time + 0.1f;
+            underMapPreviousPosition = p; nextUnderMapGeometryCheckTime = now + 0.1f;
             float drop = hasLastSafeGroundY ? lastSafeGroundY - p.y : 0f, dy = p.y - a.y;
             if (hasLastSafeGroundY && drop >= 1.5f && dy <= -0.08f && HasCrossedSolidLevelGeometry(a, p))
             {
@@ -375,20 +479,20 @@ public class CharacterMotor : MonoBehaviour
                 return;
             }
         }
-        if (hasLastSafeGroundY && Time.time >= nextUnderMapWarningCheckTime)
+        if (hasLastSafeGroundY && now >= nextUnderMapWarningCheckTime)
         {
-            nextUnderMapWarningCheckTime = Time.time + 0.1f;
+            nextUnderMapWarningCheckTime = now + 0.1f;
             if (lastSafeGroundY - p.y >= 15f && !HasSolidLevelGeometryBelow(80f)) ShowPersistentUnderMapWarning("void-fall");
         }
     }
 
     bool TryRecoverFromUnderMapGeometryCross()
     {
-        if (!hasLastSafeGroundPosition || Time.time < nextUnderMapRecoveryTime) return false;
+        if (!hasLastSafeGroundPosition || now < nextUnderMapRecoveryTime) return false;
         Vector3 target = lastSafeGroundPosition + Vector3.up * Mathf.Max(0.18f, controller.skinWidth * 2f);
         float dist = Vector3.Distance(tr.position, target);
         if (dist > 8f) return false;
-        nextUnderMapRecoveryTime = Time.time + 1f;
+        nextUnderMapRecoveryTime = now + 1f;
         bool en = controller.enabled;
         if (en) controller.enabled = false;
         tr.position = target;
@@ -399,7 +503,7 @@ public class CharacterMotor : MonoBehaviour
         ResetLocalFallTracking();
         underMapPreviousPosition = target; hasUnderMapPreviousPosition = true;
         lastSafeGroundY = target.y; lastSafeGroundPosition = target; hasLastSafeGroundY = hasLastSafeGroundPosition = true;
-        nextUnderMapGeometryCheckTime = Time.time + 0.1f; nextUnderMapWarningCheckTime = Time.time + 0.1f;
+        nextUnderMapGeometryCheckTime = now + 0.1f; nextUnderMapWarningCheckTime = now + 0.1f;
         Debug.LogWarning($"[UnderMap] Recovered CharacterController after confirmed map-geometry tunnelling. Distance={dist:F2}, Position={target}");
         return true;
     }
@@ -408,7 +512,7 @@ public class CharacterMotor : MonoBehaviour
     {
         if (!underMapWarningShown) Debug.LogWarning($"[UnderMap] Persistent warning shown. Reason={reason}, SafeY={lastSafeGroundY:F2}, Current={tr.position}");
         underMapWarningShown = true;
-        UnderMapWarning?.Invoke();
+        if (!simulated) UnderMapWarning?.Invoke();
     }
 
     bool HasCrossedSolidLevelGeometry(Vector3 a, Vector3 b)
@@ -422,7 +526,7 @@ public class CharacterMotor : MonoBehaviour
 
     bool RayCrossedSolidLevelGeometry(Vector3 o, Vector3 dir, float len)
     {
-        int n = Physics.RaycastNonAlloc(o, dir, underMapRaycastHits, len, -1, QueryTriggerInteraction.Ignore);
+        int n = Physics.RaycastNonAlloc(o, dir, underMapRaycastHits, len, ~(1 << GhostLayer), QueryTriggerInteraction.Ignore);
         for (int i = 0; i < n; i++)
         {
             var h = underMapRaycastHits[i]; var col = h.collider;
@@ -437,7 +541,7 @@ public class CharacterMotor : MonoBehaviour
     bool HasSolidLevelGeometryBelow(float dist)
     {
         Vector3 o = tr.position + Vector3.up * Mathf.Max(0.25f, controller.radius * 0.5f);
-        int n = Physics.RaycastNonAlloc(o, Vector3.down, underMapRaycastHits, dist, -1, QueryTriggerInteraction.Ignore);
+        int n = Physics.RaycastNonAlloc(o, Vector3.down, underMapRaycastHits, dist, ~(1 << GhostLayer), QueryTriggerInteraction.Ignore);
         for (int i = 0; i < n; i++)
         {
             var col = underMapRaycastHits[i].collider;
