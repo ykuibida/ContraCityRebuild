@@ -2,7 +2,9 @@
 // points, base gates) and the WALK GRID: where a fighter can stand and walk, found with the same physics the fighter uses, not with
 // Unity's NavMesh. (The NavMesh dropped floor a fighter walks on: bumpy snow, slopes, the space near garages — the owner's walk on
 // Форпост, 15.11.2026: 488 of 1773 steps were on floor the NavMesh did not have.)
-//   • a column every 1 unit over the map: a ray from the top finds every floor in it (floors, roofs, crates, beams, pipes);
+//   • a column every 1 unit over the map: rays from the top find every floor in it (floors, roofs, crates, beams, pipes). A ray
+//     reports one hit per collider, and one MeshCollider often holds a whole building (roof and the floors under it: Ангар, задний
+//     двор — the spawn rooms under concrete_0402), so the column is walked down floor by floor: a new ray from just under each hit;
 //   • a floor is a cell if the fighter's capsule fits standing on it (PlayerRig CharacterController: radius 1.3, height 6.5, sitting
 //     skinWidth 0.45 above the floor; checked with radius 1.15 so a fighter can stand by a wall or on a beam narrower than itself);
 //   • neighbouring cells (8 directions) are walk-connected when the height step is within what the motor climbs: stepOffset 1.5, or
@@ -34,6 +36,7 @@ public class LabWorld
     public Vector3[] cells;                 // feet position on the floor
     float[] cellNy;                         // floor normal's y (slope)
     public int[] cellRegion;
+    bool[] cellEdge;                        // a cell with a missing neighbour (a drop or a wall next to it)
     public int regionCount; public float[] regionArea;
     public struct Edge { public Vector3 a, b, outward; public int region; }
     public readonly List<Edge> boundary = new List<Edge>();
@@ -107,7 +110,8 @@ public class LabWorld
 
     /// <summary>Automatic doors (AutomaticDoor: base doors on Angar, ArenaRing, Arena_3lvl, …) open in the game when a player who is
     /// not of the other team comes within touchDistance; in the lab nobody comes, so they would stay shut and seal the bases. The lab
-    /// puts every door at the end of its open animation and stops the door script. Returns how many doors were opened.</summary>
+    /// shows every door open (the end of its open animation), stops the door script and switches the door's colliders off (both of
+    /// its states block a passage). Returns how many doors were opened.</summary>
     public int OpenDoors()
     {
         int n = 0;
@@ -116,9 +120,15 @@ public class LabWorld
             var anim = d.transform.parent != null ? d.transform.parent.GetComponentInChildren<Animation>() : d.GetComponentInChildren<Animation>();
             if (anim == null || string.IsNullOrEmpty(d.OpenAnimationName) || anim[d.OpenAnimationName] == null) continue;
             var st = anim[d.OpenAnimationName];
+            var dc = anim.GetComponent<Collider>(); var before = dc ? dc.bounds : new Bounds();
             st.enabled = true; st.weight = 1f; st.normalizedTime = 1f; anim.Sample(); st.enabled = false;
             anim.playAutomatically = false; anim.enabled = false;   // otherwise it plays its default (closing) clip again
             d.enabled = false; n++;
+            // and the door itself is taken out: on Форпост the base door (24 high, 33 wide) closed shuts the base exit, opened (23 up)
+            // shuts the walkway above it — the lab cannot keep it in one state; who may pass when is a rule for the bots
+            foreach (var c in anim.GetComponentsInChildren<Collider>()) if (!c.isTrigger) c.enabled = false;
+            Physics.SyncTransforms();
+            if (dc) UnityEngine.Debug.Log($"[labtest] door {d.transform.parent?.name}/{d.name} clip {d.OpenAnimationName} legacy {st.clip.legacy} wrap {st.wrapMode}: collider {before.center} -> {dc.bounds.center} (size {dc.bounds.size}), object at {anim.transform.position}");
         }
         Physics.SyncTransforms();
         return n;
@@ -165,7 +175,7 @@ public class LabWorld
             {
                 int col = iz * nx + ix; colStart[col] = pos.Count;
                 float x = x0 + (ix + 0.5f) * Cell, z = z0 + (iz + 0.5f) * Cell;
-                int n = Physics.RaycastNonAlloc(new Vector3(x, top, z), Vector3.down, hits, depth, Mask, QueryTriggerInteraction.Ignore);
+                int n = ColumnHits(x, z, top, top - depth, hits);
                 floors.Clear();
                 for (int i = 0; i < n; i++) if (hits[i].normal.y >= 0.25f) floors.Add(hits[i]);   // up to ~75°: the motor stands on steep ground
                 floors.Sort((a, b) => b.point.y.CompareTo(a.point.y));
@@ -184,6 +194,7 @@ public class LabWorld
             }
         foreach (var g in global) g.enabled = true;
         cells = pos.ToArray(); cellNy = ny.ToArray(); cellCount = cells.Length;
+        cellEdge = new bool[cellCount];
 
         // regions: union-find over walk-connected neighbours
         var parent = new int[cellCount]; for (int i = 0; i < cellCount; i++) parent[i] = i;
@@ -197,6 +208,7 @@ public class LabWorld
         for (int c = 0; c < cellCount; c++) { regionArea[cellRegion[c]] += Cell * Cell; navMinY = Mathf.Min(navMinY, cells[c].y); navMaxY = Mathf.Max(navMaxY, cells[c].y); }
         navArea = cellCount * Cell * Cell;
 
+        for (int c = 0; c < cellCount; c++) for (int k = 0; k < 8; k++) if (Neighbour(c, k) < 0) { cellEdge[c] = true; break; }
         // edges: cells with a missing neighbour; outward = the mean direction of the missing ones; every other edge cell (≈ 2 units)
         boundary.Clear();
         for (int c = 0; c < cellCount; c++)
@@ -218,6 +230,56 @@ public class LabWorld
             markers[i] = m;
         }
         BuildMesh(null);
+    }
+
+    /// <summary>Diagnostics: the columns on the line from a to b — the cells each has (height, region) and the floors the grid
+    /// rejected there (the capsule touched something: which colliders; or too steep).</summary>
+    public string WhyApart(Vector3 a, Vector3 b)
+    {
+        var sb = new System.Text.StringBuilder();
+        var global = Object.FindObjectsByType<Collider>(FindObjectsSortMode.None).Where(c => c.name == "GlobalCollider" && c.enabled).ToList();
+        foreach (var g in global) g.enabled = false;
+        var d = b - a; d.y = 0f; int steps = Mathf.Max(1, Mathf.CeilToInt(d.magnitude / Cell) * 2);
+        float lo = Mathf.Min(a.y, b.y) - 4f, hi = Mathf.Max(a.y, b.y) + 4f;
+        var hits = new RaycastHit[64]; var over = new Collider[16]; int lastCol = -1, shown = 0;
+        for (int s = 0; s <= steps && shown < 14; s++)
+        {
+            var p = Vector3.Lerp(a, b, s / (float)steps);
+            int ix = Mathf.FloorToInt((p.x - x0) / Cell), iz = Mathf.FloorToInt((p.z - z0) / Cell);
+            if (!InGrid(ix, iz)) continue;
+            int col = iz * nx + ix; if (col == lastCol) continue; lastCol = col; shown++;
+            float x = x0 + (ix + 0.5f) * Cell, z = z0 + (iz + 0.5f) * Cell;
+            sb.Append($"\n    ({x:F1}, {z:F1}): cells");
+            for (int i = colStart[col]; i < colStart[col] + colLen[col]; i++) if (cells[i].y > lo - 10f && cells[i].y < hi + 10f) sb.Append($" {cells[i].y:F2}[r{cellRegion[i]}]");
+            int n = ColumnHits(x, z, hi + 20f, lo - 10f, hits);
+            sb.Append($" (ray from {hi + 20f:F1}: {n} hits at {string.Join(" ", hits.Take(n).Select(h => $"{h.point.y:F1}'{h.collider.name}'"))})");
+            for (int i = 0; i < n; i++)
+            {
+                var h = hits[i]; if (h.point.y < lo || h.point.y > hi) continue;
+                bool isCell = false; for (int j = colStart[col]; j < colStart[col] + colLen[col]; j++) if (Mathf.Abs(cells[j].y - h.point.y) < 0.5f) isCell = true;
+                if (isCell) continue;
+                if (h.normal.y < 0.25f) { sb.Append($" | steep {h.point.y:F2} '{h.collider.name}' ny {h.normal.y:F2}"); continue; }
+                var ca = h.point + Vector3.up * (Skin + StandRadius + 0.05f); var cb = h.point + Vector3.up * (Skin + Height - StandRadius);
+                int k = Physics.OverlapCapsuleNonAlloc(ca, cb, StandRadius, over, Mask, QueryTriggerInteraction.Ignore);
+                var names = string.Join(", ", over.Take(k).Select(c => $"'{c.name}'{(c.transform.parent ? "<" + c.transform.parent.name : "")}{(c == h.collider ? "(the floor itself)" : "")}").Distinct().Take(4));
+                sb.Append($" | rejected floor {h.point.y:F2} on '{h.collider.name}' ny {h.normal.y:F2}: capsule touches {names}");
+            }
+        }
+        foreach (var g in global) g.enabled = true;
+        return sb.ToString();
+    }
+
+    /// <summary>Every surface a downward ray meets in the column (x, z) from y top to y bottom, nearest first: one ray per surface,
+    /// each starting just under the previous hit (Physics rays report only one hit per collider).</summary>
+    static int ColumnHits(float x, float z, float top, float bottom, RaycastHit[] hits)
+    {
+        int n = 0; float y = top;
+        while (n < hits.Length && y > bottom)
+        {
+            if (!Physics.Raycast(new Vector3(x, y, z), Vector3.down, out var h, y - bottom, Mask, QueryTriggerInteraction.Ignore)) break;
+            hits[n++] = h; y = h.point.y - 0.05f;
+        }
+        return n;
     }
 
     bool InGrid(int ix, int iz) => ix >= 0 && iz >= 0 && ix < nx && iz < nz;
@@ -313,7 +375,8 @@ public class LabWorld
             for (int k = 0; k < 8; k++)
             {
                 int d = Neighbour(c, k); if (d < 0 || closed.Contains(d)) continue;
-                float ng = g[c] + Vector3.Distance(cells[c], cells[d]);
+                // a step onto an edge cell costs more: the path keeps a cell away from drops (a bot cutting a corner falls off)
+                float ng = g[c] + Vector3.Distance(cells[c], cells[d]) + (cellEdge[d] ? 2f : 0f);
                 if (!g.TryGetValue(d, out float og) || ng < og) { g[d] = ng; prev[d] = c; open.Add((ng + Vector3.Distance(cells[d], cells[t]), d)); }
             }
         }
@@ -321,7 +384,7 @@ public class LabWorld
         var chain = new List<int>(); for (int c = t; ; c = prev[c]) { chain.Add(c); if (c == s) break; }
         chain.Reverse();
         var pts = new List<Vector3>();
-        for (int i = 0; i < chain.Count; i++) if (i % 3 == 0 || i == chain.Count - 1) pts.Add(cells[chain[i]]);
+        foreach (int c in chain) pts.Add(cells[c]);   // every cell: following it closely keeps the bot on narrow floors
         return pts;
     }
 

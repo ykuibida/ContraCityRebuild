@@ -263,11 +263,25 @@ public static class LabSim
             if (walk && t >= p.runUp && m.grounded) { r.landed = true; r.landing = pos; r.landingT = t; if (r.takeoffT < 0f) { r.takeoff = p.feet; r.takeoffT = 0f; } break; }
             if (!walk && takeoffs == 0 && t > jumpAt + 1f) break;   // never left the ground
         }
+        // after the landing the fighter stands 0.3 s with no keys: a landing on the very edge (the capsule's round bottom caught on a
+        // corner, grounded for a moment, feet under the floor top) slides off — that is no landing (Монетный двор, container tops)
+        if (r.landed)
+        {
+            var still = new SoldierController.Keys();
+            for (float st = 0f; st < 0.3f; st += dt)
+            {
+                s.Step(still, dt, now); m.Step(dt, now); t += dt; now += dt;
+                var pos = ghost.transform.position;
+                r.path.Add(pos); r.views.Add(new Vector2(viewYaw, 0f)); r.air.Add(!m.grounded); r.weapons.Add(r.weapons.Count > 0 ? r.weapons[r.weapons.Count - 1] : WeaponType.NONE);
+                if (!m.grounded) { r.landed = false; break; }
+            }
+            if (r.landed) r.landing = ghost.transform.position;
+        }
         r.time = t;
         r.maxRise = peakY - p.feet.y;
         if (r.landed)
         {
-            r.onWalkable = LabWorld.OnWalkable(r.landing);
+            r.onWalkable = LabWorld.OnWalkable(r.landing, 1f);
             float h = Mathf.Max(0f, peakY - r.landing.y);   // CharacterMotor.ReportLocalFallDamageOnLand: 40 from 30, 80 from 60, if falling ≥ 18
             r.fallDamage = h < 30f || r.maxDownSpeed < 18f ? 0 : h >= 60f ? 80 : 40;
         }
@@ -295,12 +309,16 @@ public static class LabSim
         while (t < limit)
         {
             var pos = ghost.transform.position;
-            while (c < corners.Length - 1 && Horizontal(corners[c] - pos) < 1.5f) c++;
+            while (c < corners.Length - 1 && Horizontal(corners[c] - pos) < 1.1f) c++;
             var to = corners[Mathf.Min(c, corners.Length - 1)] - pos; to.y = 0f;
             if (Horizontal(target - pos) < 1.5f) { r.reached = true; break; }
-            if (to.sqrMagnitude > 0.0001f) yaw = Mathf.MoveTowardsAngle(yaw, Quaternion.LookRotation(to).eulerAngles.y, 720f * dt);
+            float want = to.sqrMagnitude > 0.0001f ? Quaternion.LookRotation(to).eulerAngles.y : yaw;
+            yaw = Mathf.MoveTowardsAngle(yaw, want, 720f * dt);
             ghost.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
-            s.Step(SoldierController.Keys.Moves(false, false, true, false), dt, now);
+            // W only once it faces the way (within 40°): after a backwards shotgun jump the bot stands facing back; holding W while
+            // it turns walked it off the container it had just landed on (Монетный двор)
+            bool facing = Mathf.Abs(Mathf.DeltaAngle(yaw, want)) < 40f;
+            s.Step(SoldierController.Keys.Moves(false, false, facing, false), dt, now);
             m.Step(dt, now);
             t += dt; now += dt;
             r.path.Add(ghost.transform.position); r.views.Add(new Vector2(yaw, 0f)); r.air.Add(!m.grounded); r.weapons.Add(WeaponType.MACHINE_GUN);

@@ -156,3 +156,36 @@ is a 30 000-cell plane at +44.
   The first opening of a new map now takes several minutes; these four are cached.
 - **Routes:** 11 of 12 walked. On Монетный двор one route ended short of its target; to look at.
 - **Spawns:** on Ангар (задний двор) 4 of 23 spawn markers are not on the grid; to look at.
+
+## Why grey: the leftovers explained and fixed (15.11.2026)
+
+The autotest now explains the biggest grey regions by itself (`-labtest`). For each one it finds the closest pair of cells, grey and reachable. It then lists what lies between them: every floor in each column and, for a rejected floor, the colliders the fighter's capsule touches. It also saves a picture `uitest/lab_<map>_why_*.png`. A walking leg that ends away from its target logs where the bot first left the ground.
+
+**Found and fixed (all maps):**
+- **Floors under floors of one collider.** A physics ray reports one hit per collider. One MeshCollider often holds a whole building: on Ангар, задний двор, `concrete_0402` is the roof (y 4.9) and the spawn room floor (y −13.7). The grid saw only the roof. Now each column is walked down floor by floor, with a new ray from just under each hit. All 23 spawns of Ангар, задний двор are now on the grid (before: 19), and that map has a route without rockets.
+- **Base doors (AutomaticDoor).** On Форпост the base door is 24 high and 33 wide. Closed, it shuts the base exit. Opened, it rises 23 and shuts the walkway above it. The lab cannot keep it in one state, so it shows the door open and switches its colliders off. Which team may pass, and when, is a rule for the bots (see plan.md).
+- **Landings on the very edge.** The capsule's round bottom caught on a corner and counted as standing for a moment, then slid off. Now, after a landing, the fighter stands 0.3 s with no keys. The jump counts only if it is still on the floor.
+- **Walking off ledges.**
+  - After a backwards shotgun jump the bot faced back and held W while turning, which walked it off the container. Now it presses W only once it faces within 40° of the way.
+  - The walking path also pays extra for edge cells, so it keeps a cell away from drops, and the bot follows every cell.
+
+**What stays grey on Форпост, and why (checked from the pictures and the column lists):**
+- **Snow outside the ring wall.** It is separated by the wall `wood_0300`.
+- **The ground under the two bases.** It is 21 below the base floor and closed in.
+- **The base roofs.** They are beyond the ring wall and no jump reaches them.
+- **The invisible ceilings at +44 and +57.** They are not drawn.
+
+**Result (fresh search):**
+
+| Map | Regions reachable | Jumps | Spawns on the grid | Search |
+|---|---|---|---|---|
+| Форпост | 135 | 17 264 | 15/15 | 5.9 min |
+| Комиссариат | 87 | 17 055 | 21/21 | 6.4 min |
+| Ангар, задний двор | 58 | 10 630 | 23/23 | 5.0 min |
+| Монетный двор | 68 | 15 822 | 19/19 | 5.2 min |
+
+- **Routes:** 12 of 12 walked to the target.
+- **Owner's walk on Форпост:** 1 772 of 1 773 steps are reachable.
+- **Without rockets:**
+  - Комиссариат: the hardest of the three test targets still needs a rocket.
+  - Ангар, задний двор: now has a route.

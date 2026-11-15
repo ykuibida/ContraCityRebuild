@@ -20,7 +20,7 @@ using UnityEngine.AI;
 
 public class LabLinks
 {
-    public const int Version = 7;   // 7: the walk grid instead of the NavMesh   // bump when the search or LabSim changes: cached files of another version are ignored
+    public const int Version = 8;   // 7: the walk grid instead of the NavMesh; 8: floors under floors of one collider, doors out, landings that hold 0.3 s   // bump when the search or LabSim changes: cached files of another version are ignored
 
     [System.Serializable]
     public class Link
@@ -335,6 +335,19 @@ public class LabLinks
                 if (r.landed) LabSim.Place(ghost, r.landing, ghost.transform.eulerAngles.y);
             }
             all.path.AddRange(r.path); all.views.AddRange(r.views); all.air.AddRange(r.air); all.weapons.AddRange(r.weapons);
+            // a leg that ended away from where it should have: the reason a route fails
+            var end = ghost.transform.position; var want = leg.link != null ? leg.link.to : leg.to;
+            if (LabSim.Horizontal(end - want) > 3f || Mathf.Abs(end.y - want.y) > 3f)
+            {
+                string detail = "";
+                if (leg.link == null)
+                {
+                    var gp = world.FindPath(r.start, leg.to);
+                    int fall = r.air.IndexOf(true);
+                    detail = $"; from {r.start} cell region {world.RegionAt(r.start, 2f)}, grid path {(gp == null ? "none" : string.Join(" ", gp.Take(8)))}; first airborne at {(fall >= 0 ? r.path[fall].ToString() : "-")} after {(fall >= 0 ? fall * r.dt : 0f):F2} s";
+                }
+                all.events.Add(new LabSim.Event { t = all.path.Count * all.dt, what = $"MISS leg {route.legs.IndexOf(leg)} ({(leg.link != null ? leg.link.move.ToString() : "walk")}): ended {end}, should {want}{detail}", at = end });
+            }
         }
         all.landing = all.path.Count > 0 ? all.path[all.path.Count - 1] : a;
         all.time = all.path.Count * all.dt;

@@ -511,6 +511,45 @@ public class LabController : MonoBehaviour
         Log("picture: uitest/" + name + ".png");
     }
 
+    /// <summary>Why grey: for the biggest grey regions near the reachable floor, the closest pair of cells (grey, reachable), what lies
+    /// between them (LabWorld.WhyApart) and a picture; the spawns that are not on the grid, what is under them.</summary>
+    IEnumerator GreyDiagnostics()
+    {
+        var reach = new List<int>(); for (int c = 0; c < world.cellCount; c++) if (links.reachable.Contains(world.cellRegion[c])) reach.Add(c);
+        float topReach = reach.Count > 0 ? reach.Max(c => world.cells[c].y) : 0f;
+        var grey = Enumerable.Range(0, world.regionCount).Where(r => !links.reachable.Contains(r)).OrderByDescending(r => world.regionArea[r]).ToList();
+        int shots = 0;
+        foreach (int r in grey)
+        {
+            if (shots >= 8) break;
+            var rc = Enumerable.Range(0, world.cellCount).Where(c => world.cellRegion[c] == r).ToList();
+            if (rc.Count < 30 || rc.Average(c => world.cells[c].y) > topReach + 12f) continue;
+            // the closest pair: horizontal distance plus the height difference
+            int bg = -1, bq = -1; float bd = float.MaxValue;
+            for (int i = 0; i < rc.Count; i += 2)
+            {
+                var g = world.cells[rc[i]];
+                foreach (int q in reach) { var d = world.cells[q] - g; float s = Mathf.Abs(d.x) + Mathf.Abs(d.z); if (s > bd) continue; s += Mathf.Abs(d.y); if (s < bd) { bd = s; bg = rc[i]; bq = q; } }
+            }
+            if (bg < 0 || bd > 30f) continue;
+            var a = world.cells[bg]; var b = world.cells[bq];
+            Log($"{map}: WHY grey region {r} ({rc.Count} cells, y {rc.Min(c => world.cells[c].y):F1}..{rc.Max(c => world.cells[c].y):F1}): closest grey {a} to reachable {b} (region {world.cellRegion[bq]}), dy {b.y - a.y:+0.0;-0.0}{world.WhyApart(a, b)}");
+            // a picture: from the reachable side, 35° down, the grey cell marked red, the reachable one green
+            var p1 = LabDraw.Primitive(PrimitiveType.Cylinder, "DiagGrey", a + Vector3.up * 5f, new Vector3(0.5f, 5f, 0.5f), Color.red, routeRoot);
+            var p2 = LabDraw.Primitive(PrimitiveType.Cylinder, "DiagReach", b + Vector3.up * 5f, new Vector3(0.5f, 5f, 0.5f), Color.green, routeRoot);
+            var mid = (a + b) / 2f; var side = b - a; side.y = 0f; if (side.sqrMagnitude < 0.01f) side = Vector3.forward; side.Normalize();
+            cam.orthographic = false;
+            cam.transform.position = a - side * 7f + Vector3.up * 5f; cam.transform.rotation = Quaternion.LookRotation(b + Vector3.up * 2f - cam.transform.position);
+            yield return Shot($"lab_{map}_why_{shots}_r{r}");
+            Destroy(p1); Destroy(p2); shots++;
+        }
+        foreach (var m in world.markers.Where(m => LabWorld.IsSpawn(m.kind) && m.region < 0))
+        {
+            var all = Physics.RaycastAll(m.position + Vector3.up * 2f, Vector3.down, 30f, ~0, QueryTriggerInteraction.Collide).OrderBy(h => h.distance).Take(6);
+            Log($"{map}: spawn {m.kind} {m.name} at {m.position} is not on the grid; below: {string.Join("; ", all.Select(h => $"'{h.collider.name}' layer {h.collider.gameObject.layer} trigger {h.collider.isTrigger} y {h.point.y:F2} ny {h.normal.y:F2}"))}{world.WhyApart(m.position + Vector3.left * 1.5f, m.position + Vector3.right * 1.5f)}");
+        }
+    }
+
     IEnumerator AutoTest()
     {
         Log($"=== {map}: walk grid {world.cellCount} cells of {LabWorld.Cell}×{LabWorld.Cell} ({world.columns} columns), {world.regionCount} regions, built in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
@@ -549,6 +588,7 @@ public class LabController : MonoBehaviour
                     Log($"{map}: owner's walk {Path.GetFileName(f)}: {steps} grounded steps, on the walk grid {onGrid} ({100f * onGrid / Mathf.Max(1, steps):F0}%), reachable {reach} ({100f * reach / Mathf.Max(1, steps):F0}%)");
                 }
         }
+        yield return GreyDiagnostics();
         // overview: all links over the reachable surface
         showLinks = true; linksObj.SetActive(true);
         var b = world.bounds; cam.orthographic = true;
@@ -566,6 +606,8 @@ public class LabController : MonoBehaviour
             ClearRoute(); startPt = spawn.position; targetPt = t.to; DrawFlags(); MakeRoute();
             bool reached = played != null && LabSim.Horizontal(played.landing - t.to) < 3f && Mathf.Abs(played.landing.y - t.to.y) < 3f;
             Log($"{map}: route {n} from {spawn.kind} {spawn.position} to {t.to} (region {t.toRegion}, +{t.to.y - spawn.position.y:F1}): {(route == null ? "none: " + routeText : $"{route.legs.Count} legs, {route.legs.Count(l => l.link != null)} jumps, reached {reached}, {routeText}")}");
+            if (played != null) foreach (var e in played.events.Where(e => e.what.StartsWith("MISS"))) Log($"{map}: route {n} {e.what}");
+            if (route != null && !reached) for (int li = 0; li < route.legs.Count; li++) { var lg = route.legs[li]; Log($"{map}: route {n} leg {li}: {(lg.link != null ? $"{lg.link.move} {lg.link.from} -> {lg.link.to} yaw {lg.link.yaw:F0} observed {lg.link.observed}" : $"walk to {lg.to}")}"); }
             if (played != null && n == 0)
             {
                 // from above over the whole route, then behind the bot in its first jump, then through its eyes
