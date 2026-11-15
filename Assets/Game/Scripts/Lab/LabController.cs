@@ -677,8 +677,86 @@ public class LabController : MonoBehaviour
         }
     }
 
+    /// <summary>Diagnostics (-labdiag): the owner's jumps the lab did not know or knew only a longer way for
+    /// (Docs/bots/lab_walks/&lt;map&gt;_*.jumps.txt): what the grid has at his take-off and landing, and whether the simulation repeats
+    /// the jump from his take-off spot (LabLinks.Reproduce; the link it finds is taken out again, the cache stays as it was).</summary>
+    IEnumerator OwnerJumpsDiag()
+    {
+        var walkDir = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "..", "Docs", "bots", "lab_walks"));
+        if (!Directory.Exists(walkDir)) yield break;
+        var rx = new System.Text.RegularExpressions.Regex(@"^(\w+) \((-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\) -> \((-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\).*? run [\d,]+: (.*)$");
+        float F(string s) => float.Parse(s, System.Globalization.CultureInfo.InvariantCulture);
+        string Where(Vector3 p)
+        {
+            int c = world.CellAt(p, 2f); if (c < 0) return "no cell within 2";
+            int r = world.cellRegion[c];
+            return $"cell {world.cells[c]} region {r} ({world.regionArea[r]:F0} sq, {(links.reachable.Contains(r) ? "reachable" : "GREY")}, {world.boundary.Count(e => e.region == r)} edge spots, links from it {links.links.Count(l => l.fromRegion == r)})";
+        }
+        int n = 0;
+        foreach (var f in Directory.GetFiles(walkDir, map + "_*.jumps.txt").OrderBy(x => x))
+            foreach (var line in File.ReadAllLines(f))
+            {
+                var m = rx.Match(line); if (!m.Success || n >= 12) continue;
+                string res = m.Groups[8].Value;
+                if (res.StartsWith("бот умеет")) continue;
+                if (!System.Enum.TryParse<LabSim.Move>(m.Groups[1].Value, out var mv)) continue;
+                var a = new Vector3(F(m.Groups[2].Value), F(m.Groups[3].Value), F(m.Groups[4].Value));
+                var b = new Vector3(F(m.Groups[5].Value), F(m.Groups[6].Value), F(m.Groups[7].Value));
+                n++;
+                Log($"{map}: owner jump {n} ({Path.GetFileName(f)}) {mv} {a} -> {b} (+{b.y - a.y:F1}, {LabSim.Horizontal(b - a):F1} across): {res}");
+                Log($"{map}: owner jump {n} take-off: {Where(a)}; landing: {Where(b)}");
+                var side = Vector3.Cross(Vector3.up, (b - a).normalized); if (side.sqrMagnitude < 0.01f) side = Vector3.right;
+                if (world.CellAt(a, 2f) < 0) Log($"{map}: owner jump {n} take-off grid:{world.WhyApart(a - side * 2f, a + side * 2f)}");
+                if (world.CellAt(b, 2f) < 0) Log($"{map}: owner jump {n} landing grid:{world.WhyApart(b - side * 2f, b + side * 2f)}");
+                LabLinks.Link got = null; string why = ""; var sw = System.Diagnostics.Stopwatch.StartNew();
+                int rb = world.RegionAt(b, 2f); bool wasReachable = rb >= 0 && links.reachable.Contains(rb);
+                yield return links.Reproduce(a, b, mv, (l, w) => { got = l; why = w; });
+                Log($"{map}: owner jump {n} repeated: {(got != null ? $"{got.move} {got.Params().Recipe()} from {got.from} lands {got.to}, {got.time:F2} s" : "no")}; {why}; {sw.Elapsed.TotalSeconds:F0} s");
+                if (got != null) { if (!wasReachable) links.reachable.Remove(rb); links.Forget(got); }
+            }
+    }
+
+    /// <summary>Diagnostics (-labdiag): how quickly each way covers flat open ground (a floor far under the map, no walls), from a
+    /// standstill: running with the rifle, running with the bat (×1.25), bunnyhops, bat hops, shotgun hops.</summary>
+    void FlatSpeedDiag()
+    {
+        var floor = GameObject.CreatePrimitive(PrimitiveType.Cube); floor.name = "DiagFlat";
+        floor.transform.position = new Vector3(0f, -5000f, 0f); floor.transform.localScale = new Vector3(4000f, 2f, 4000f);
+        Physics.SyncTransforms();
+        var feet = new Vector3(0f, -4999f, -1500f);
+        void One(string what, LabSim.Params p)
+        {
+            p.feet = feet; p.yaw = 0f; p.fps = LabSim.BotFps; p.maxTime = 20f;
+            var r = LabSim.Run(ghost, p);
+            float t = r.landingT > 0f ? r.landingT : r.time, d = LabSim.Horizontal((r.landed ? r.landing : ghost.transform.position) - feet);
+            Log($"{map}: flat {what}: {d:F1} in {t:F2} s = {d / Mathf.Max(0.01f, t):F2}/s (landed {r.landed})");
+        }
+        foreach (float s in new[] { 2f, 5f, 9f })
+        {
+            One($"run rifle {s} s", new LabSim.Params { move = LabSim.Move.Walk, runUp = s });
+            One($"run bat {s} s", new LabSim.Params { move = LabSim.Move.Walk, runUp = s, hold = WeaponType.ONE_HANDED_COLD_ARMS });
+        }
+        foreach (int h in new[] { 3, 6, 12 })
+        {
+            One($"bunnyhop rifle {h} hops", new LabSim.Params { move = LabSim.Move.Bunnyhop, runUp = 0.3f, hops = h });
+            One($"bunnyhop bat {h} hops", new LabSim.Params { move = LabSim.Move.Bat, runUp = 0.3f, hops = h });
+            One($"bunnyhop shotgun-in-hand {h} hops", new LabSim.Params { move = LabSim.Move.Bunnyhop, runUp = 0.3f, hops = h, hold = WeaponType.SHOT_GUN });
+        }
+        foreach (int sh in new[] { 1, 2, 3 })
+            foreach (float pi in new[] { 30f, 50f, 70f })
+                One($"shotgun {sh} shots {pi:F0}° back", new LabSim.Params { move = LabSim.Move.Shotgun, runUp = 0.3f, shots = sh, pitch = pi, backwards = true, fireDelay = 0.15f });
+        Destroy(floor);
+    }
+
     IEnumerator AutoTest()
     {
+        if (System.Environment.GetCommandLineArgs().Contains("-labdiag"))
+        {
+            FlatSpeedDiag();
+            yield return OwnerJumpsDiag();
+            Log($"{map}: diag done");
+            yield break;
+        }
         Log($"=== {map}: walk grid {world.cellCount} cells of {LabWorld.Cell}×{LabWorld.Cell} ({world.columns} columns), {world.regionCount} regions, built in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
         float reachArea = links.reachable.Sum(r => world.regionArea[r]);
         Log($"{map}: reachable from the spawns {links.reachable.Count} regions, {reachArea:F0} sq units ({100f * reachArea / Mathf.Max(1f, world.navArea):F0}% of the surface); spawns on the surface {world.markers.Count(m => LabWorld.IsSpawn(m.kind) && m.region >= 0)}/{world.markers.Count(m => LabWorld.IsSpawn(m.kind))}");

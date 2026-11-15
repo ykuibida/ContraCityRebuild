@@ -54,6 +54,7 @@ public static class LabSim
         public bool backwards = true;       // shotgun: back to the direction of travel, moving with S (the usual technique)
         public float fps = BotFps;          // simulation frame rate
         public float maxTime = 6f;
+        public WeaponType hold = WeaponType.NONE;   // diagnostics: the weapon in hand instead of the move's own (walking with the bat)
         public Params Clone() => (Params)MemberwiseClone();
 
         /// <summary>How to do it by hand, in words.</summary>
@@ -165,7 +166,7 @@ public static class LabSim
         bool rocketFirst = p.move == Move.Rocket || p.move == Move.RocketShotgun;
         bool shotgun = p.move == Move.Shotgun || p.move == Move.RocketShotgun;
         var sg = Weapon(WeaponType.SHOT_GUN); var rl = Weapon(WeaponType.ROCKET_LAUNCHER);
-        var inHand = rocketFirst ? rl : shotgun ? sg : p.move == Move.Bat ? Weapon(WeaponType.ONE_HANDED_COLD_ARMS) : Weapon(WeaponType.MACHINE_GUN);
+        var inHand = p.hold != WeaponType.NONE ? Weapon(p.hold) : rocketFirst ? rl : shotgun ? sg : p.move == Move.Bat ? Weapon(WeaponType.ONE_HANDED_COLD_ARMS) : Weapon(WeaponType.MACHINE_GUN);
         SetWeapon(ghost, inHand);
         float sgInterval = sg != null ? Mathf.Max(sg.ShotTime / 1e7f, 0.45f) : 0.45f;
 
