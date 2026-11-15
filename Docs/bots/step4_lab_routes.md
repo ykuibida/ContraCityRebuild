@@ -93,3 +93,32 @@ Pictures in this folder:
   - self-damage of the rocket;
   - team rules for doors.
 - **Still to calibrate** against live jumps: the shot origin, pellet spread, and the 0.5 s weapon switch.
+
+## Fixes after the owner's first look at Форпост (15.11.2026)
+
+The owner saw two kinds of wrong grey: ordinary floor and the snow on a roof marked unreachable, and pipes leading to a roof
+missing altogether.
+
+- **Tile seams.** The NavMesh is built in tiles. Along a seam the polygons of two tiles do not share vertices, so the old region
+  test split one floor into islands and greyed out walkable floor. An open edge with surface right across it, at the same height,
+  is now joined as a seam.
+- **Thin surfaces.**
+  - The surface is baked with radius 0.4 instead of 1.3, which had eroded pipes, beams and roof edges away.
+  - Jump starts on thin surfaces sit 0.4 inside the edge.
+- **Doors closing again.** Opened doors were closing again through their own animation. That gave the owner's run 1 164 jumps
+  instead of 9 863. The door animation is now switched off once the door is open.
+- **Click snapping.** A click next to the surface snaps to the nearest walkable point.
+- **The test's map-after-map runs** kept the previous map's NavMesh. The figures of maps 2–4 in the table above are wrong for that
+  reason.
+
+Clean figures:
+
+| Map | Regions reachable / all | Reachable surface | Jumps |
+|---|---|---|---|
+| Форпост | 63 / 120 | 41 100 (63 %) | 4 409 |
+| Комиссариат | 60 / 233 | 56 300 (16 %) | 9 633 |
+| Ангар, задний двор | 38 / 131 | 26 700 (30 %) | 3 659 |
+| Монетный двор | 65 / 155 | 39 400 (17 %) | 7 373 |
+
+Routes: 12 of 12 found and walked. The cache format is version 2, with a fingerprint of the surface, so old caches are rebuilt by
+themselves.

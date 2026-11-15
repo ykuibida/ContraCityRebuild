@@ -20,7 +20,7 @@ using UnityEngine.AI;
 
 public class LabLinks
 {
-    public const int Version = 1;   // bump when the search or LabSim changes: cached files of another version are ignored
+    public const int Version = 2;   // bump when the search or LabSim changes: cached files of another version are ignored
 
     [System.Serializable]
     public class Link
@@ -32,7 +32,7 @@ public class LabLinks
         public LabSim.Params Params() => new LabSim.Params { move = move, feet = from, yaw = yaw, runUp = runUp, pitch = pitch, fireDelay = fireDelay, hops = hops, shots = shots, backwards = backwards, fps = LabSim.BotFps };
     }
 
-    [System.Serializable] class File_ { public int version; public string map; public float seconds; public int sims; public List<Link> links; public List<int> reachable; }
+    [System.Serializable] class File_ { public int version; public string map; public int triangles, regions; public float seconds; public int sims; public List<Link> links; public List<int> reachable; }
 
     public readonly List<Link> links = new List<Link>();
     public readonly HashSet<int> reachable = new HashSet<int>();
@@ -50,7 +50,7 @@ public class LabLinks
         try
         {
             var f = JsonUtility.FromJson<File_>(File.ReadAllText(p));
-            if (f == null || f.version != Version || f.links == null) return false;
+            if (f == null || f.version != Version || f.links == null || f.triangles != world.navTriangles || f.regions != world.regionCount) return false;
             thinned = null; links.Clear(); links.AddRange(f.links); reachable.Clear(); foreach (var r in f.reachable) reachable.Add(r);
             if (reachable.Any(r => r >= world.regionCount)) return false;
             for (int i = 0; i < links.Count; i++) links[i].id = i;
@@ -63,7 +63,7 @@ public class LabLinks
     void Save()
     {
         var p = CachePath(map); Directory.CreateDirectory(Path.GetDirectoryName(p));
-        File.WriteAllText(p, JsonUtility.ToJson(new File_ { version = Version, map = map, seconds = seconds, sims = sims, links = links, reachable = reachable.ToList() }));
+        File.WriteAllText(p, JsonUtility.ToJson(new File_ { version = Version, map = map, triangles = world.navTriangles, regions = world.regionCount, seconds = seconds, sims = sims, links = links, reachable = reachable.ToList() }));
     }
 
     // the moves tried at every start spot: (move, run-up, extra)
@@ -101,8 +101,9 @@ public class LabLinks
                 for (int si = 0; si < samples; si++)
                 {
                     var onEdge = Vector3.Lerp(e.a, e.b, (si + 0.5f) / samples);
-                    var spot = onEdge - e.outward * 1.6f;   // just inside the edge (radius 1.3 + a little)
-                    if (world.RegionAt(spot) != region) continue;
+                    // just inside the edge: 1.6 where there is room (the fighter's radius 1.3 + a little), else 0.4 (a pipe, a beam)
+                    var spot = onEdge - e.outward * 1.6f;
+                    if (world.RegionAt(spot) != region) { spot = onEdge - e.outward * 0.4f; if (world.RegionAt(spot) != region) continue; }
                     float baseYaw = Quaternion.LookRotation(e.outward).eulerAngles.y;
                     foreach (float dy in new[] { 0f, -30f, 30f })
                     {
@@ -130,7 +131,7 @@ public class LabLinks
                             {
                                 move = p.move, from = p.feet, to = r.landing, yaw = yaw, runUp = p.runUp, pitch = p.pitch, fireDelay = p.fireDelay, hops = p.hops, shots = p.shots, backwards = p.backwards,
                                 time = r.time, rise = r.Rise, peak = r.maxRise, distance = LabSim.Horizontal(r.landing - p.feet), fromRegion = region, toRegion = to, shortcut = shortcut,
-                                path = r.path.Where((x, i) => i % 8 == 0 || i == r.path.Count - 1).ToArray(),
+                                path = r.path.Where((x, i) => i % 24 == 0 || i == r.path.Count - 1).ToArray(),
                             };
                             var key = (Mathf.RoundToInt(p.feet.x / 6f), Mathf.RoundToInt(p.feet.z / 6f), Mathf.RoundToInt(r.landing.x / 4f), Mathf.RoundToInt(r.landing.y / 2f), Mathf.RoundToInt(r.landing.z / 4f), region);
                             if (!best.TryGetValue(key, out var old) || link.time < old.time) best[key] = link;

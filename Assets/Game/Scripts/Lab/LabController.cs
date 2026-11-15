@@ -88,7 +88,7 @@ public class LabController : MonoBehaviour
     // the route on screen
     Vector3? startPt, targetPt; LabLinks.Route route; LabSim.Result played; string routeText = "";
     float playT; float speed = 1f; int camMode = 1;   // 0 free, 1 behind the bot, 2 the bot's eyes
-    string marksNote = "";
+    string marksNote = "", snapNote = "";
 
     IEnumerator Start()
     {
@@ -193,6 +193,9 @@ public class LabController : MonoBehaviour
 
     void Pick(Vector3 p)
     {
+        string moved = "";
+        if (world.RegionAt(p, 1.5f) < 0 && UnityEngine.AI.NavMesh.SamplePosition(p, out var near, 6f, UnityEngine.AI.NavMesh.AllAreas)) { moved = $" (точка сдвинута на ближайшую поверхность, {Vector3.Distance(p, near.position):F1})"; p = near.position; }
+        snapNote = moved;
         if (startPt == null || targetPt != null) { ClearRoute(); startPt = p; DrawFlags(); ShowNear(p); return; }
         targetPt = p; DrawFlags(); if (nearObj) Destroy(nearObj);
         MakeRoute();
@@ -330,7 +333,7 @@ public class LabController : MonoBehaviour
         if (!ready) { GUILayout.Label(status, label); GUILayout.EndArea(); return; }
         GUILayout.Label("<b>1.</b> Щёлкни левой кнопкой, <b>откуда</b> бот стартует.\n<b>2.</b> Щёлкни, <b>куда</b> ему нужно попасть.\nБот сам найдёт путь с прыжками и пройдёт его.", label);
         GUILayout.Space(4);
-        if (routeText != "") GUILayout.Label(routeText, small);
+        if (routeText != "") GUILayout.Label(routeText + snapNote, small);
         if (played != null)
         {
             GUILayout.BeginHorizontal();
@@ -381,7 +384,7 @@ public class LabController : MonoBehaviour
 
     IEnumerator AutoTest()
     {
-        Log($"=== {map}: walkable {world.navArea:F0} sq units, {world.navTriangles} triangles, {world.regionCount} regions, baked in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
+        Log($"=== {map}: walkable {world.navArea:F0} sq units, {world.navTriangles} triangles, {world.regionCount} regions ({world.seamEdges} tile-seam edges joined), baked in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
         float reachArea = links.reachable.Sum(r => world.regionArea[r]);
         Log($"{map}: reachable from the spawns {links.reachable.Count} regions, {reachArea:F0} sq units ({100f * reachArea / Mathf.Max(1f, world.navArea):F0}% of the surface); spawns on the surface {world.markers.Count(m => LabWorld.IsSpawn(m.kind) && m.region >= 0)}/{world.markers.Count(m => LabWorld.IsSpawn(m.kind))}");
         Log($"{map}: search {links.state}; base gate colliders opened {gatesOpened}, automatic doors opened {doorsOpened}");
