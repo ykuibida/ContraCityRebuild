@@ -1,12 +1,17 @@
 // Bots steps 2–4 (map lab): what the lab knows about a map. The markers the map already has (team spawns, pickups, flags, control
-// points, base gates) and the walkable surface for the fighter's size (Unity NavMesh baked at runtime from the map's colliders:
-// radius 1.3, height 6.5, step 1.5 — the CharacterController of PlayerRig). The surface is split into walk regions (triangles that
-// share an edge); its outer edges (ledges, wall feet) are where the jump search starts; what is not reachable from the spawns is grey.
+// points, base gates) and the WALK GRID: where a fighter can stand and walk, found with the same physics the fighter uses, not with
+// Unity's NavMesh. (The NavMesh dropped floor a fighter walks on: bumpy snow, slopes, the space near garages — the owner's walk on
+// Форпост, 15.11.2026: 488 of 1773 steps were on floor the NavMesh did not have.)
+//   • a column every 1 unit over the map: a ray from the top finds every floor in it (floors, roofs, crates, beams, pipes);
+//   • a floor is a cell if the fighter's capsule fits standing on it (PlayerRig CharacterController: radius 1.3, height 6.5, sitting
+//     skinWidth 0.45 above the floor; checked with radius 1.15 so a fighter can stand by a wall or on a beam narrower than itself);
+//   • neighbouring cells (8 directions) are walk-connected when the height step is within what the motor climbs: stepOffset 1.5, or
+//     the slope (the CharacterController's slopeLimit is 90: the fighter walks up steep slopes);
+//   • walk regions = connected cells; a region's edge cells (missing neighbours) are where the jump search starts.
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using UnityEngine;
-using UnityEngine.AI;
 
 public class LabWorld
 {
@@ -14,33 +19,27 @@ public class LabWorld
 
     public struct Marker { public MarkerKind kind; public string name; public Vector3 position; public bool onNavMesh; public int region; }
 
+    public static LabWorld Current;   // the map open in the lab (LabSim asks it what is walkable)
+
     public readonly List<Marker> markers = new List<Marker>();
     public Bounds bounds;
-    NavMeshDataInstance navInstance;
     public Mesh navMesh;
-    public float navArea, bakeMs, navMinY, navMaxY; public int navTriangles, sources, seamEdges, pathJoins;
+    public float navArea, bakeMs, navMinY, navMaxY; public int cellCount, columns;
 
-    // walk regions
-    public Vector3[] verts; public int[] tris;          // the triangulation (welded)
-    public int[] triRegion; public int regionCount;
-    public float[] regionArea;
+    // the grid
+    public const float Cell = 1f;
+    const float StandRadius = 1.15f, Skin = 0.45f, Height = 6.5f, Step = 1.5f;
+    float x0, z0; int nx, nz;
+    int[] colStart, colLen;                 // per column: its cells [colStart, colStart + colLen) in the arrays below
+    public Vector3[] cells;                 // feet position on the floor
+    float[] cellNy;                         // floor normal's y (slope)
+    public int[] cellRegion;
+    public int regionCount; public float[] regionArea;
     public struct Edge { public Vector3 a, b, outward; public int region; }
     public readonly List<Edge> boundary = new List<Edge>();
-    readonly Dictionary<long, List<int>> triGrid = new Dictionary<long, List<int>>();
-    const float GridCell = 8f;
 
-    public static readonly NavMeshBuildSettings Agent = MakeAgent();
-    static NavMeshBuildSettings MakeAgent()
-    {
-        var s = NavMesh.GetSettingsByIndex(0);
-        // radius 0.4, not the CharacterController's 1.3: Recast erodes every edge by the radius, ledges too, and 1.3 wiped out the
-        // pipes, beams and roof edges fighters stand and run on (the capsule rests on a beam narrower than itself). Walls are kept off
-        // by the real motor, which collides with them; the jump search starts 1.6 inside an edge where there is room.
-        s.agentRadius = 0.4f; s.agentHeight = 6.5f; s.agentClimb = 1.5f; s.agentSlope = 60f;
-        s.overrideVoxelSize = true; s.voxelSize = 0.2f;
-        s.minRegionArea = 1f;
-        return s;
-    }
+    static readonly int[] DX = { 1, -1, 0, 0, 1, 1, -1, -1 }, DZ = { 0, 0, 1, -1, 1, -1, 1, -1 };
+    static int Mask => ~((1 << CharacterMotor.GhostLayer) | (1 << 31) | (1 << 30) | (1 << 29));   // not simulated fighters, UI, previews
 
     public static Color ColorOf(MarkerKind k)
     {
@@ -140,116 +139,77 @@ public class LabWorld
         return n;
     }
 
-    /// <summary>Bakes the walkable surface from every solid collider of the map (triggers and simulated fighters left out), then
-    /// splits it into walk regions and finds its outer edges.</summary>
+    // ---------------- the walk grid ----------------
+
+    /// <summary>Builds the walk grid from the map's colliders (see the header), then the regions and their edges.</summary>
     public void BakeNavMesh()
     {
+        Current = this;
         var sw = Stopwatch.StartNew();
-        var src = new List<NavMeshBuildSource>();
-        var b = bounds; b.Expand(20f);
-        NavMeshBuilder.CollectSources(b, ~(1 << CharacterMotor.GhostLayer), NavMeshCollectGeometry.PhysicsColliders, 0, new List<NavMeshBuildMarkup>(), src);
-        // triggers, fighters, and the GlobalCollider (every map's huge boundary box around the level) are not floor
-        src.RemoveAll(s => s.component is Collider c && (c.isTrigger || c is CharacterController || c.name == "GlobalCollider"));
-        sources = src.Count;
-        // one map at a time: the previous map's surface (a new LabWorld per map in -labtest) must not stay in the NavMesh
-        NavMesh.RemoveAllNavMeshData();
-        var data = NavMeshBuilder.BuildNavMeshData(Agent, src, b, Vector3.zero, Quaternion.identity);
-        navInstance = NavMesh.AddNavMeshData(data);
-        bakeMs = (float)sw.Elapsed.TotalMilliseconds;
+        // the extent: solid colliders of the map, without the GlobalCollider (every map's huge boundary box) — it is switched off
+        // while baking, so rays from above are not stopped by its top and the capsule checks do not touch it
+        var global = Object.FindObjectsByType<Collider>(FindObjectsSortMode.None).Where(c => c.name == "GlobalCollider" && c.enabled).ToList();
+        foreach (var g in global) g.enabled = false;
+        var cols = Object.FindObjectsByType<Collider>(FindObjectsSortMode.None).Where(c => c.enabled && !c.isTrigger && !(c is CharacterController) && ((1 << c.gameObject.layer) & Mask) != 0 && c.bounds.extents.magnitude < 2000f).ToList();
+        var ext = cols.Count > 0 ? cols[0].bounds : new Bounds(bounds.center, Vector3.one * 100f);
+        foreach (var c in cols) ext.Encapsulate(c.bounds);
+        x0 = Mathf.Floor(ext.min.x) - 2f; z0 = Mathf.Floor(ext.min.z) - 2f;
+        nx = Mathf.CeilToInt(ext.size.x / Cell) + 4; nz = Mathf.CeilToInt(ext.size.z / Cell) + 4;
+        float top = ext.max.y + 5f, depth = ext.size.y + 10f;
+        columns = nx * nz;
+        colStart = new int[columns]; colLen = new int[columns];
+        var pos = new List<Vector3>(columns); var ny = new List<float>(columns);
+        var hits = new RaycastHit[64]; var floors = new List<RaycastHit>(16);
+        for (int iz = 0; iz < nz; iz++)
+            for (int ix = 0; ix < nx; ix++)
+            {
+                int col = iz * nx + ix; colStart[col] = pos.Count;
+                float x = x0 + (ix + 0.5f) * Cell, z = z0 + (iz + 0.5f) * Cell;
+                int n = Physics.RaycastNonAlloc(new Vector3(x, top, z), Vector3.down, hits, depth, Mask, QueryTriggerInteraction.Ignore);
+                floors.Clear();
+                for (int i = 0; i < n; i++) if (hits[i].normal.y >= 0.25f) floors.Add(hits[i]);   // up to ~75°: the motor stands on steep ground
+                floors.Sort((a, b) => b.point.y.CompareTo(a.point.y));
+                float lastY = float.MaxValue;
+                foreach (var h in floors)
+                {
+                    var p = h.point;
+                    if (lastY - p.y < 0.5f) continue;   // the same floor hit twice (two colliders)
+                    lastY = p.y;
+                    // the fighter's capsule standing here (its bottom Skin above the floor)
+                    var a = p + Vector3.up * (Skin + StandRadius + 0.05f); var b = p + Vector3.up * (Skin + Height - StandRadius);
+                    if (Physics.CheckCapsule(a, b, StandRadius, Mask, QueryTriggerInteraction.Ignore)) continue;
+                    pos.Add(p); ny.Add(h.normal.y);
+                }
+                colLen[col] = pos.Count - colStart[col];
+            }
+        foreach (var g in global) g.enabled = true;
+        cells = pos.ToArray(); cellNy = ny.ToArray(); cellCount = cells.Length;
 
-        // weld the triangulation (polygons of neighbouring tiles repeat vertices)
-        var tri = NavMesh.CalculateTriangulation();
-        var map = new Dictionary<(int, int, int), int>(); var vl = new List<Vector3>(); var remap = new int[tri.vertices.Length];
-        for (int i = 0; i < tri.vertices.Length; i++)
-        {
-            var v = tri.vertices[i]; var key = (Mathf.RoundToInt(v.x * 20f), Mathf.RoundToInt(v.y * 20f), Mathf.RoundToInt(v.z * 20f));
-            if (!map.TryGetValue(key, out int id)) { id = vl.Count; vl.Add(v); map[key] = id; }
-            remap[i] = id;
-        }
-        verts = vl.ToArray(); tris = tri.indices.Select(i => remap[i]).ToArray();
-        navTriangles = tris.Length / 3;
-
-        // regions: triangles sharing an edge (union-find)
-        int n = navTriangles; var parent = Enumerable.Range(0, n).ToArray();
-        int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
-        void Union(int x, int y) { int rx = Find(x), ry = Find(y); if (rx != ry) parent[rx] = ry; }
-        var edgeOwner = new Dictionary<(int, int), int>(); var edgeCount = new Dictionary<(int, int), int>();
-        for (int t = 0; t < n; t++)
-            for (int e = 0; e < 3; e++)
-            {
-                int a = tris[t * 3 + e], c = tris[t * 3 + (e + 1) % 3]; var key = a < c ? (a, c) : (c, a);
-                if (edgeOwner.TryGetValue(key, out int o)) { Union(o, t); edgeCount[key]++; }
-                else { edgeOwner[key] = t; edgeCount[key] = 1; }
-            }
-        triGrid.Clear();
-        navArea = 0f; navMinY = float.MaxValue; navMaxY = float.MinValue;
-        for (int t = 0; t < n; t++)
-        {
-            Vector3 p0 = verts[tris[t * 3]], p1 = verts[tris[t * 3 + 1]], p2 = verts[tris[t * 3 + 2]];
-            navArea += Vector3.Cross(p1 - p0, p2 - p0).magnitude * 0.5f;
-            navMinY = Mathf.Min(navMinY, p0.y, p1.y, p2.y); navMaxY = Mathf.Max(navMaxY, p0.y, p1.y, p2.y);
-            int x0 = Mathf.FloorToInt(Mathf.Min(p0.x, p1.x, p2.x) / GridCell), x1 = Mathf.FloorToInt(Mathf.Max(p0.x, p1.x, p2.x) / GridCell);
-            int z0 = Mathf.FloorToInt(Mathf.Min(p0.z, p1.z, p2.z) / GridCell), z1 = Mathf.FloorToInt(Mathf.Max(p0.z, p1.z, p2.z) / GridCell);
-            for (int x = x0; x <= x1; x++) for (int z = z0; z <= z1; z++) { long k = ((long)x << 32) ^ (uint)z; if (!triGrid.TryGetValue(k, out var l)) triGrid[k] = l = new List<int>(); l.Add(t); }
-        }
-        // the NavMesh is built in tiles: along a tile seam the polygons of the two tiles meet without sharing vertices (T-junctions),
-        // so the shared-edge test splits one floor into islands. An open edge with surface right across it (0.25 out, at the same
-        // height within 0.75) is a seam, not a real edge: join the two sides. Real edges (walls, ledges, drops) stay edges.
-        var open = new List<((int, int) key, int tri, Vector3 mid, Vector3 outward)>();
-        foreach (var kv in edgeCount)
-        {
-            if (kv.Value != 1) continue;
-            int t = edgeOwner[kv.Key]; Vector3 a = verts[kv.Key.Item1], c = verts[kv.Key.Item2];
-            var centroid = (verts[tris[t * 3]] + verts[tris[t * 3 + 1]] + verts[tris[t * 3 + 2]]) / 3f;
-            var along = c - a; along.y = 0f; if (along.sqrMagnitude < 0.0001f) continue;
-            var outward = Vector3.Cross(Vector3.up, along).normalized;
-            var mid = (a + c) * 0.5f; var toC = centroid - mid; toC.y = 0f;
-            if (Vector3.Dot(outward, toC) > 0f) outward = -outward;
-            open.Add((kv.Key, t, mid, outward));
-        }
-        var seam = new HashSet<(int, int)>(); pathJoins = 0;
-        foreach (var o in open)
-        {
-            int across = -1;
-            foreach (float f in new[] { 0.3f, 0.7f })   // two points along the edge, so a short seam piece is not missed
-            {
-                var p = Vector3.Lerp(verts[o.key.Item1], verts[o.key.Item2], f) + o.outward * 0.25f;
-                across = TriangleAt(p, 1.5f, o.tri);   // 1.5: the agent's step; the triangulation is coarser than the ground
-                if (across >= 0) break;
-            }
-            if (across >= 0) { Union(o.tri, across); seam.Add(o.key); }
-        }
-        // the NavMesh's own path search is the final word on walking: islands left by the triangulation (seams on bumpy ground,
-        // detail-mesh offsets) that the NavMesh connects are joined. For every region a point on its largest triangle; regions are
-        // put together when NavMesh.CalculatePath between those points completes.
-        {
-            var roots = new Dictionary<int, int>(); var tArea = new float[n];
-            for (int t = 0; t < n; t++) { Vector3 p0 = verts[tris[t * 3]], p1 = verts[tris[t * 3 + 1]], p2 = verts[tris[t * 3 + 2]]; tArea[t] = Vector3.Cross(p1 - p0, p2 - p0).magnitude; }
-            for (int t = 0; t < n; t++) { int r = Find(t); if (!roots.TryGetValue(r, out int bt) || tArea[t] > tArea[bt]) roots[r] = t; }
-            var reps = new List<(int tri, Vector3 p, float area)>();
-            var rArea = new Dictionary<int, float>(); for (int t = 0; t < n; t++) { int r = Find(t); rArea[r] = (rArea.TryGetValue(r, out var a0) ? a0 : 0f) + tArea[t]; }
-            foreach (var kv in roots)
-            {
-                var c = (verts[tris[kv.Value * 3]] + verts[tris[kv.Value * 3 + 1]] + verts[tris[kv.Value * 3 + 2]]) / 3f;
-                if (NavMesh.SamplePosition(c, out var h, 2f, NavMesh.AllAreas)) reps.Add((kv.Value, h.position, rArea[kv.Key]));
-            }
-            reps.Sort((x, y) => y.area.CompareTo(x.area));
-            var comps = new List<(int tri, Vector3 p)>(); var navPath = new NavMeshPath();
-            foreach (var r in reps)
-            {
-                bool joined = false;
-                foreach (var c in comps)
-                    if (NavMesh.CalculatePath(r.p, c.p, NavMesh.AllAreas, navPath) && navPath.status == NavMeshPathStatus.PathComplete) { Union(r.tri, c.tri); joined = true; pathJoins++; break; }
-                if (!joined) comps.Add((r.tri, r.p));
-            }
-        }
-        var ids = new Dictionary<int, int>(); triRegion = new int[n];
-        for (int t = 0; t < n; t++) { int r = Find(t); if (!ids.TryGetValue(r, out int id)) { id = ids.Count; ids[r] = id; } triRegion[t] = id; }
+        // regions: union-find over walk-connected neighbours
+        var parent = new int[cellCount]; for (int i = 0; i < cellCount; i++) parent[i] = i;
+        int Find(int v) { while (parent[v] != v) { parent[v] = parent[parent[v]]; v = parent[v]; } return v; }
+        for (int c = 0; c < cellCount; c++)
+            foreach (int d in Neighbours(c)) { int ra = Find(c), rb = Find(d); if (ra != rb) parent[ra] = rb; }
+        var ids = new Dictionary<int, int>(); cellRegion = new int[cellCount];
+        for (int c = 0; c < cellCount; c++) { int r = Find(c); if (!ids.TryGetValue(r, out int id)) { id = ids.Count; ids[r] = id; } cellRegion[c] = id; }
         regionCount = ids.Count; regionArea = new float[regionCount];
-        for (int t = 0; t < n; t++) { Vector3 p0 = verts[tris[t * 3]], p1 = verts[tris[t * 3 + 1]], p2 = verts[tris[t * 3 + 2]]; regionArea[triRegion[t]] += Vector3.Cross(p1 - p0, p2 - p0).magnitude * 0.5f; }
-        boundary.Clear(); seamEdges = seam.Count;   // pathJoins counted above
-        foreach (var o in open)
-            if (!seam.Contains(o.key)) boundary.Add(new Edge { a = verts[o.key.Item1], b = verts[o.key.Item2], outward = o.outward, region = triRegion[o.tri] });
+        navMinY = float.MaxValue; navMaxY = float.MinValue;
+        for (int c = 0; c < cellCount; c++) { regionArea[cellRegion[c]] += Cell * Cell; navMinY = Mathf.Min(navMinY, cells[c].y); navMaxY = Mathf.Max(navMaxY, cells[c].y); }
+        navArea = cellCount * Cell * Cell;
+
+        // edges: cells with a missing neighbour; outward = the mean direction of the missing ones; every other edge cell (≈ 2 units)
+        boundary.Clear();
+        for (int c = 0; c < cellCount; c++)
+        {
+            ColumnOf(c, out int ix, out int iz);
+            if (((ix + iz) & 1) != 0) continue;
+            var outward = Vector3.zero; int missing = 0;
+            for (int k = 0; k < 8; k++) if (Neighbour(c, k) < 0) { outward += new Vector3(DX[k], 0f, DZ[k]).normalized; missing++; }
+            if (missing == 0 || outward.sqrMagnitude < 0.01f) continue;
+            outward.Normalize();
+            boundary.Add(new Edge { a = cells[c] + outward * 1.3f, b = cells[c] + outward * 1.3f, outward = outward, region = cellRegion[c] });
+        }
+        bakeMs = (float)sw.Elapsed.TotalMilliseconds;
         for (int i = 0; i < markers.Count; i++)
         {
             var m = markers[i];
@@ -260,58 +220,127 @@ public class LabWorld
         BuildMesh(null);
     }
 
-    /// <summary>The triangle whose XZ footprint holds p and whose surface there is within maxDy of p.y (closest), -1 if none.</summary>
-    int TriangleAt(Vector3 q, float maxDy, int skip = -1)
+    bool InGrid(int ix, int iz) => ix >= 0 && iz >= 0 && ix < nx && iz < nz;
+    void ColumnOf(int c, out int ix, out int iz)
     {
-        long k = ((long)Mathf.FloorToInt(q.x / GridCell) << 32) ^ (uint)Mathf.FloorToInt(q.z / GridCell);
-        if (!triGrid.TryGetValue(k, out var list)) return -1;
-        int best = -1; float bestDy = maxDy;
-        foreach (int t in list)
+        ix = Mathf.FloorToInt((cells[c].x - x0) / Cell); iz = Mathf.FloorToInt((cells[c].z - z0) / Cell);
+    }
+
+    /// <summary>The cell in direction k (0..7) that this cell walks to, -1 if none (a wall, a drop, a too high step).</summary>
+    int Neighbour(int c, int k)
+    {
+        ColumnOf(c, out int ix, out int iz);
+        int jx = ix + DX[k], jz = iz + DZ[k];
+        if (!InGrid(jx, jz)) return -1;
+        int col = jz * nx + jx; float y = cells[c].y;
+        // the step the motor takes: stepOffset 1.5; on a slope more (the climb of the slope over one cell, CharacterController slopeLimit 90)
+        float dist = k < 4 ? Cell : Cell * 1.4142f;
+        int best = -1; float bestDy = float.MaxValue;
+        for (int i = colStart[col]; i < colStart[col] + colLen[col]; i++)
         {
-            if (t == skip) continue;
-            Vector3 a = verts[tris[t * 3]], b = verts[tris[t * 3 + 1]], c = verts[tris[t * 3 + 2]];
-            float d = (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z); if (Mathf.Abs(d) < 1e-6f) continue;
-            float w1 = ((b.z - c.z) * (q.x - c.x) + (c.x - b.x) * (q.z - c.z)) / d, w2 = ((c.z - a.z) * (q.x - c.x) + (a.x - c.x) * (q.z - c.z)) / d, w3 = 1f - w1 - w2;
-            if (w1 < -0.02f || w2 < -0.02f || w3 < -0.02f) continue;
-            float dy = Mathf.Abs(w1 * a.y + w2 * b.y + w3 * c.y - q.y);
-            if (dy < bestDy) { bestDy = dy; best = t; }
+            float dy = Mathf.Abs(cells[i].y - y);
+            float slopeNy = Mathf.Min(cellNy[c], cellNy[i]);
+            float allowed = Mathf.Max(Step, dist * Mathf.Tan(Mathf.Acos(Mathf.Clamp(slopeNy, 0.26f, 1f))) + 0.3f);
+            if (dy <= allowed && dy < bestDy) { bestDy = dy; best = i; }
         }
         return best;
     }
 
-    /// <summary>The walk region under this point (feet), -1 if there is no walkable surface within tolerance.</summary>
-    public int RegionAt(Vector3 p, float tolerance = 1.5f)
+    IEnumerable<int> Neighbours(int c) { for (int k = 0; k < 8; k++) { int d = Neighbour(c, k); if (d >= 0) yield return d; } }
+
+    /// <summary>The cell under this point (feet): its column or the next ones, the floor within tolerance. -1 if none.</summary>
+    public int CellAt(Vector3 p, float tolerance = 1.5f)
     {
-        if (!NavMesh.SamplePosition(p, out var hit, tolerance, NavMesh.AllAreas) || Mathf.Abs(hit.position.y - p.y) > tolerance) return -1;
-        var q = hit.position;
-        long k = ((long)Mathf.FloorToInt(q.x / GridCell) << 32) ^ (uint)Mathf.FloorToInt(q.z / GridCell);
-        if (!triGrid.TryGetValue(k, out var list)) return -1;
-        int best = -1; float bestDy = 2.0f;   // the coarse triangulation can sit ~1–2 off bumpy ground (sand, terrain)
-        foreach (int t in list)
-        {
-            Vector3 a = verts[tris[t * 3]], b = verts[tris[t * 3 + 1]], c = verts[tris[t * 3 + 2]];
-            // barycentric in XZ
-            float d = (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z); if (Mathf.Abs(d) < 1e-6f) continue;
-            float w1 = ((b.z - c.z) * (q.x - c.x) + (c.x - b.x) * (q.z - c.z)) / d, w2 = ((c.z - a.z) * (q.x - c.x) + (a.x - c.x) * (q.z - c.z)) / d, w3 = 1f - w1 - w2;
-            if (w1 < -0.02f || w2 < -0.02f || w3 < -0.02f) continue;
-            float y = w1 * a.y + w2 * b.y + w3 * c.y, dy = Mathf.Abs(y - q.y);
-            if (dy < bestDy) { bestDy = dy; best = triRegion[t]; }
-        }
+        if (cells == null) return -1;
+        int ix = Mathf.FloorToInt((p.x - x0) / Cell), iz = Mathf.FloorToInt((p.z - z0) / Cell);
+        int best = -1; float bestD = float.MaxValue;
+        for (int r = 0; r <= 1 && best < 0; r++)
+            for (int dz = -r; dz <= r; dz++)
+                for (int dx = -r; dx <= r; dx++)
+                {
+                    int jx = ix + dx, jz = iz + dz; if (!InGrid(jx, jz)) continue;
+                    int col = jz * nx + jx;
+                    for (int i = colStart[col]; i < colStart[col] + colLen[col]; i++)
+                    {
+                        float dy = Mathf.Abs(cells[i].y - p.y); if (dy > tolerance) continue;
+                        float d = dy + LabSim.Horizontal(cells[i] - p);
+                        if (d < bestD) { bestD = d; best = i; }
+                    }
+                }
         return best;
     }
 
-    /// <summary>The surface mesh for drawing: reachable regions coloured by height (cyan → green → yellow → magenta), the rest grey.</summary>
+    /// <summary>The walk region under this point (feet), -1 if there is no walkable floor within tolerance.</summary>
+    public int RegionAt(Vector3 p, float tolerance = 1.5f) { int c = CellAt(p, tolerance); return c < 0 ? -1 : cellRegion[c]; }
+
+    /// <summary>The nearest walkable cell within maxDist (horizontally; floor within maxDist vertically).</summary>
+    public bool Snap(Vector3 p, float maxDist, out Vector3 q)
+    {
+        q = p; if (cells == null) return false;
+        int ix = Mathf.FloorToInt((p.x - x0) / Cell), iz = Mathf.FloorToInt((p.z - z0) / Cell), R = Mathf.CeilToInt(maxDist / Cell);
+        int best = -1; float bestD = float.MaxValue;
+        for (int dz = -R; dz <= R; dz++)
+            for (int dx = -R; dx <= R; dx++)
+            {
+                int jx = ix + dx, jz = iz + dz; if (!InGrid(jx, jz)) continue;
+                int col = jz * nx + jx;
+                for (int i = colStart[col]; i < colStart[col] + colLen[col]; i++)
+                {
+                    float d = Vector3.Distance(cells[i], p); if (d > maxDist) continue;
+                    if (d < bestD) { bestD = d; best = i; }
+                }
+            }
+        if (best < 0) return false;
+        q = cells[best]; return true;
+    }
+
+    /// <summary>Is there walkable floor right under this point (feet)?</summary>
+    public static bool OnWalkable(Vector3 feet, float tolerance = 1.5f) => Current != null && Current.CellAt(feet, tolerance) >= 0;
+
+    /// <summary>A walking path over the grid (A*, 8 directions), as points every few cells; null if the cells are not walk-connected.</summary>
+    public List<Vector3> FindPath(Vector3 a, Vector3 b)
+    {
+        int s = CellAt(a, 2f), t = CellAt(b, 2f);
+        if (s < 0 || t < 0 || cellRegion[s] != cellRegion[t]) return null;
+        var g = new Dictionary<int, float> { [s] = 0f }; var prev = new Dictionary<int, int>();
+        var open = new SortedSet<(float f, int c)>(); open.Add((Vector3.Distance(cells[s], cells[t]), s));
+        var closed = new HashSet<int>();
+        while (open.Count > 0)
+        {
+            var cur = open.Min; open.Remove(cur); int c = cur.c;
+            if (c == t) break;
+            if (!closed.Add(c)) continue;
+            for (int k = 0; k < 8; k++)
+            {
+                int d = Neighbour(c, k); if (d < 0 || closed.Contains(d)) continue;
+                float ng = g[c] + Vector3.Distance(cells[c], cells[d]);
+                if (!g.TryGetValue(d, out float og) || ng < og) { g[d] = ng; prev[d] = c; open.Add((ng + Vector3.Distance(cells[d], cells[t]), d)); }
+            }
+        }
+        if (!g.ContainsKey(t)) return null;
+        var chain = new List<int>(); for (int c = t; ; c = prev[c]) { chain.Add(c); if (c == s) break; }
+        chain.Reverse();
+        var pts = new List<Vector3>();
+        for (int i = 0; i < chain.Count; i++) if (i % 3 == 0 || i == chain.Count - 1) pts.Add(cells[chain[i]]);
+        return pts;
+    }
+
+    public float WalkDistance(Vector3 a, Vector3 b)
+    {
+        var p = FindPath(a, b); if (p == null) return float.PositiveInfinity;
+        float l = 0f; for (int i = 1; i < p.Count; i++) l += Vector3.Distance(p[i - 1], p[i]); return l;
+    }
+
+    /// <summary>The cells for drawing: reachable regions coloured by height (cyan → green → yellow → magenta), the rest grey.</summary>
     public void BuildMesh(HashSet<int> reachable)
     {
         if (navMesh == null) navMesh = new Mesh { indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
         navMesh.Clear();
-        // per-triangle vertices so a region keeps its own colour
-        var v = new Vector3[tris.Length]; var col = new Color[tris.Length]; var idx = new int[tris.Length];
         float y0 = navMinY, y1 = navMaxY;
         if (reachable != null && reachable.Count > 0)
         {
             y0 = float.MaxValue; y1 = float.MinValue;
-            for (int t = 0; t < tris.Length / 3; t++) if (reachable.Contains(triRegion[t])) for (int k = 0; k < 3; k++) { float y = verts[tris[t * 3 + k]].y; y0 = Mathf.Min(y0, y); y1 = Mathf.Max(y1, y); }
+            for (int c = 0; c < cellCount; c++) if (reachable.Contains(cellRegion[c])) { y0 = Mathf.Min(y0, cells[c].y); y1 = Mathf.Max(y1, cells[c].y); }
         }
         float span = Mathf.Max(1f, Mathf.Min(y1 - y0, 60f));
         Color Height(float y)
@@ -320,17 +349,23 @@ public class LabWorld
             var a = new Color(0.1f, 0.8f, 1f); var b = new Color(0.3f, 1f, 0.3f); var c = new Color(1f, 0.9f, 0.2f); var d = new Color(1f, 0.3f, 0.9f);
             return t < 0.33f ? Color.Lerp(a, b, t / 0.33f) : t < 0.66f ? Color.Lerp(b, c, (t - 0.33f) / 0.33f) : Color.Lerp(c, d, (t - 0.66f) / 0.34f);
         }
-        for (int i = 0; i < tris.Length; i++)
+        // grey (unreachable) floor is drawn only up to a jump above the highest reachable floor: higher up are the maps' invisible
+        // ceilings (Форпост: a 30 000-cell plane at +44 over the whole arena) that would cover the view
+        float greyTop = reachable != null && reachable.Count > 0 ? y1 + 12f : float.MaxValue;
+        var draw = Enumerable.Range(0, cellCount).Where(c => reachable == null || reachable.Contains(cellRegion[c]) || cells[c].y <= greyTop).ToArray();
+        var v = new Vector3[draw.Length * 4]; var col = new Color[draw.Length * 4]; var idx = new int[draw.Length * 6];
+        float h = Cell * 0.5f;
+        for (int q = 0; q < draw.Length; q++)
         {
-            var p = verts[tris[i]]; v[i] = p + Vector3.up * 0.25f; idx[i] = i;
-            bool ok = reachable == null || reachable.Contains(triRegion[i / 3]);
-            col[i] = ok ? Height(p.y) : new Color(0.35f, 0.35f, 0.35f, 0.25f);
+            int c = draw[q];
+            var p = cells[c] + Vector3.up * 0.2f;
+            bool ok = reachable == null || reachable.Contains(cellRegion[c]);
+            var cc = ok ? Height(cells[c].y) : new Color(0.25f, 0.25f, 0.25f, 0.35f);
+            v[q * 4] = p + new Vector3(-h, 0, -h); v[q * 4 + 1] = p + new Vector3(-h, 0, h); v[q * 4 + 2] = p + new Vector3(h, 0, h); v[q * 4 + 3] = p + new Vector3(h, 0, -h);
+            for (int k = 0; k < 4; k++) col[q * 4 + k] = cc;
+            idx[q * 6] = q * 4; idx[q * 6 + 1] = q * 4 + 1; idx[q * 6 + 2] = q * 4 + 2; idx[q * 6 + 3] = q * 4; idx[q * 6 + 4] = q * 4 + 2; idx[q * 6 + 5] = q * 4 + 3;
         }
         navMesh.vertices = v; navMesh.colors = col; navMesh.triangles = idx;
         navMesh.RecalculateBounds();
     }
-
-    /// <summary>Is there walkable surface right under this point (feet)?</summary>
-    public static bool OnWalkable(Vector3 feet, float tolerance = 1.5f) =>
-        NavMesh.SamplePosition(feet, out var hit, tolerance, NavMesh.AllAreas) && Mathf.Abs(hit.position.y - feet.y) < tolerance;
 }

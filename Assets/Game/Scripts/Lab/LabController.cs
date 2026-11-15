@@ -94,8 +94,8 @@ public class LabController : MonoBehaviour
 
     // ---- walk yourself (G): the owner plays a normal fighter; the steps show where the lab is wrong and teach it ----
     GameObject walker; float walkNext; readonly List<(Vector3 p, bool grounded, int region, float t)> walkLog = new List<(Vector3, bool, int, float)>();
-    LineRenderer walkGood, walkBad; int walkLearned; string walkNote = "";
-    readonly List<Vector3> walkGoodPts = new List<Vector3>(), walkBadPts = new List<Vector3>();
+    int walkLearned; string walkNote = "";
+    readonly List<Vector3> walkRun = new List<Vector3>(); LineRenderer walkLine; bool walkRunOk; Vector3 walkLast;
 
     void StartWalk()
     {
@@ -112,8 +112,7 @@ public class LabController : MonoBehaviour
         cam.enabled = false; var fly = cam.GetComponent<FlyCamera>(); if (fly) fly.enabled = false;
         var al = cam.GetComponent<AudioListener>(); if (al) al.enabled = false;
         Cursor.lockState = CursorLockMode.Locked; Cursor.visible = false;
-        walkLog.Clear(); walkGoodPts.Clear(); walkBadPts.Clear(); walkLearned = 0; walkNote = "";
-        if (walkGood) Destroy(walkGood.gameObject); if (walkBad) Destroy(walkBad.gameObject);
+        walkLog.Clear(); walkRun.Clear(); walkLine = null; walkLearned = 0; walkNote = "";
     }
 
     void StopWalk()
@@ -149,10 +148,11 @@ public class LabController : MonoBehaviour
         walkLog.Add((p, m.grounded, r, Time.time));
         if (!m.grounded) return;
         bool ok = r >= 0 && links.reachable.Contains(r);
-        (ok ? walkGoodPts : walkBadPts).Add(p + Vector3.up * 0.3f);
-        if (walkGood) Destroy(walkGood.gameObject); if (walkBad) Destroy(walkBad.gameObject);
-        if (walkGoodPts.Count > 1) walkGood = LabDraw.Line("WalkGood", walkGoodPts, new Color(0.3f, 1f, 0.3f), 0.5f, routeRoot);
-        if (walkBadPts.Count > 1) walkBad = LabDraw.Line("WalkBad", walkBadPts, new Color(1f, 0.2f, 0.2f), 0.7f, routeRoot);
+        // one line per stretch of the same verdict; a new stretch on a change or a gap (a jump, a fall)
+        if (walkLine == null || ok != walkRunOk || Vector3.Distance(p, walkLast) > 4f) { walkRun.Clear(); if (walkLine != null && walkRun.Count == 0 && ok == walkRunOk) { } walkLine = null; walkRunOk = ok; }
+        walkRun.Add(p + Vector3.up * 0.3f); walkLast = p;
+        if (walkLine) Destroy(walkLine.gameObject);
+        if (walkRun.Count > 1) walkLine = LabDraw.Line(ok ? "WalkGood" : "WalkBad", walkRun, ok ? new Color(0.3f, 1f, 0.3f) : new Color(1f, 0.2f, 0.2f), ok ? 0.5f : 0.7f, routeRoot);
     }
 
     void SaveWalk(int greyPoints)
@@ -163,7 +163,7 @@ public class LabController : MonoBehaviour
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"# {map} {System.DateTime.Now:yyyy-MM-dd HH:mm}: {walkLog.Count} steps, {greyPoints} grounded steps on grey, learned {walkLearned}");
         sb.AppendLine("t,x,y,z,grounded,region,reachable");
-        foreach (var s in walkLog) sb.AppendLine($"{s.t:F2},{s.p.x:F2},{s.p.y:F2},{s.p.z:F2},{(s.grounded ? 1 : 0)},{s.region},{(s.region >= 0 && links.reachable.Contains(s.region) ? 1 : 0)}");
+        foreach (var s in walkLog) sb.AppendLine(string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:F2},{1:F2},{2:F2},{3:F2},{4},{5},{6}", s.t, s.p.x, s.p.y, s.p.z, s.grounded ? 1 : 0, s.region, s.region >= 0 && links.reachable.Contains(s.region) ? 1 : 0));
         File.WriteAllText(Path.Combine(dir, $"{map}_{System.DateTime.Now:yyyyMMdd_HHmmss}.csv"), sb.ToString());
     }
 
@@ -276,7 +276,7 @@ public class LabController : MonoBehaviour
     void Pick(Vector3 p)
     {
         string moved = "";
-        if (world.RegionAt(p, 1.5f) < 0 && UnityEngine.AI.NavMesh.SamplePosition(p, out var near, 6f, UnityEngine.AI.NavMesh.AllAreas)) { moved = $" (точка сдвинута на ближайшую поверхность, {Vector3.Distance(p, near.position):F1})"; p = near.position; }
+        if (world.RegionAt(p, 1.5f) < 0 && world.Snap(p, 6f, out var near)) { moved = $" (точка сдвинута на ближайшую поверхность, {Vector3.Distance(p, near):F1})"; p = near; }
         snapNote = moved;
         if (startPt == null || targetPt != null) { ClearRoute(); startPt = p; DrawFlags(); ShowNear(p); return; }
         targetPt = p; DrawFlags(); if (nearObj) Destroy(nearObj);
@@ -513,34 +513,42 @@ public class LabController : MonoBehaviour
 
     IEnumerator AutoTest()
     {
-        Log($"=== {map}: walkable {world.navArea:F0} sq units, {world.navTriangles} triangles, {world.regionCount} regions ({world.seamEdges} tile-seam edges, {world.pathJoins} NavMesh-path joins), baked in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
+        Log($"=== {map}: walk grid {world.cellCount} cells of {LabWorld.Cell}×{LabWorld.Cell} ({world.columns} columns), {world.regionCount} regions, built in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
         float reachArea = links.reachable.Sum(r => world.regionArea[r]);
         Log($"{map}: reachable from the spawns {links.reachable.Count} regions, {reachArea:F0} sq units ({100f * reachArea / Mathf.Max(1f, world.navArea):F0}% of the surface); spawns on the surface {world.markers.Count(m => LabWorld.IsSpawn(m.kind) && m.region >= 0)}/{world.markers.Count(m => LabWorld.IsSpawn(m.kind))}");
         Log($"{map}: search {links.state}; base gate colliders opened {gatesOpened}, automatic doors opened {doorsOpened}");
-        // diagnostics: the biggest grey (unreachable) regions — where they are, what is above them, how they meet the reachable ones
+        // diagnostics: the biggest grey (unreachable) regions — where they are and how close the reachable floor is
         {
-            var reachTris = new List<int>(); for (int t = 0; t < world.tris.Length / 3; t++) if (links.reachable.Contains(world.triRegion[t])) reachTris.Add(t);
-            Vector3 C(int t) => (world.verts[world.tris[t * 3]] + world.verts[world.tris[t * 3 + 1]] + world.verts[world.tris[t * 3 + 2]]) / 3f;
-            var spawnP = world.markers.First(m => LabWorld.IsSpawn(m.kind) && m.region >= 0).position;
-            var np = new UnityEngine.AI.NavMeshPath();
+            var reachCells = new List<int>(); for (int c = 0; c < world.cellCount; c += 2) if (links.reachable.Contains(world.cellRegion[c])) reachCells.Add(c);
             var grey = Enumerable.Range(0, world.regionCount).Where(r => !links.reachable.Contains(r)).OrderByDescending(r => world.regionArea[r]).Take(12).ToList();
+            float greyArea = Enumerable.Range(0, world.regionCount).Where(r => !links.reachable.Contains(r)).Sum(r => world.regionArea[r]);
+            Log($"{map}: grey (unreachable) {greyArea:F0} sq units in {world.regionCount - links.reachable.Count} regions");
             foreach (int r in grey)
             {
-                var rt = Enumerable.Range(0, world.tris.Length / 3).Where(t => world.triRegion[t] == r).ToList();
-                var big = rt.OrderByDescending(t => Vector3.Cross(world.verts[world.tris[t * 3 + 1]] - world.verts[world.tris[t * 3]], world.verts[world.tris[t * 3 + 2]] - world.verts[world.tris[t * 3]]).magnitude).First();
-                var c = C(big);
-                float up = Physics.Raycast(c + Vector3.up * 0.5f, Vector3.up, out var hu, 50f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore) ? hu.distance + 0.5f : 99f;
-                string upName = up < 99f ? hu.collider.name : "-";
-                bool down = Physics.Raycast(c + Vector3.up * 2f, Vector3.down, out var hd, 6f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore);
+                var rc = Enumerable.Range(0, world.cellCount).Where(c => world.cellRegion[c] == r).ToList();
+                var mid = rc.Aggregate(Vector3.zero, (acc, c) => acc + world.cells[c]) / rc.Count;
                 float nearH = 999f, nearV = 0f;
-                foreach (int t in reachTris) { var d = C(t) - c; float h = new Vector2(d.x, d.z).magnitude; if (h < nearH) { nearH = h; nearV = d.y; } }
-                bool sp = UnityEngine.AI.NavMesh.SamplePosition(c, out var sh, 2f, UnityEngine.AI.NavMesh.AllAreas);
-                var st = UnityEngine.AI.NavMesh.CalculatePath(sp ? sh.position : c, spawnP, UnityEngine.AI.NavMesh.AllAreas, np) ? np.status.ToString() : "fail";
-                Log($"{map}: grey region {r}: area {world.regionArea[r]:F0}, {rt.Count} tris, at {c}, ceiling {up:F1} ({upName}), floor collider {(down ? hd.collider.name + " " + LayerMask.LayerToName(hd.collider.gameObject.layer) : "-")}, nearest reachable {nearH:F1} away, dy {nearV:+0.0;-0.0}, sample {(sp ? (sh.position - c).ToString() : "none")}, path to spawn {st}");
+                foreach (int c in reachCells) { var d = world.cells[c] - mid; float h = new Vector2(d.x, d.z).magnitude; if (h < nearH) { nearH = h; nearV = d.y; } }
+                float up = Physics.Raycast(mid + Vector3.up * 0.5f, Vector3.up, out var hu, 50f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore) ? hu.distance + 0.5f : 99f;
+                Log($"{map}: grey region {r}: {rc.Count} cells, centre {mid}, y {rc.Min(c => world.cells[c].y):F1}..{rc.Max(c => world.cells[c].y):F1}, ceiling {up:F1}, nearest reachable floor {nearH:F1} away, dy {nearV:+0.0;-0.0}");
             }
+            // the owner's recorded walks: how many of his grounded steps the grid has, and whether they are reachable
+            var walkDir = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "..", "Docs", "bots", "lab_walks"));
+            if (Directory.Exists(walkDir))
+                foreach (var f in Directory.GetFiles(walkDir, map + "_*.csv"))
+                {
+                    int steps = 0, onGrid = 0, reach = 0;
+                    foreach (var line in File.ReadAllLines(f).Skip(2))
+                    {
+                        var m = System.Text.RegularExpressions.Regex.Match(line, @"^(-?\d+[.,]\d\d),(-?\d+[.,]\d\d),(-?\d+[.,]\d\d),(-?\d+[.,]\d\d),(\d),");
+                        if (!m.Success || m.Groups[5].Value != "1") continue;
+                        float F(int g) => float.Parse(m.Groups[g].Value.Replace(',', '.'), System.Globalization.CultureInfo.InvariantCulture);
+                        var pt = new Vector3(F(2), F(3), F(4)); steps++;
+                        int rr = world.RegionAt(pt, 2f); if (rr >= 0) { onGrid++; if (links.reachable.Contains(rr)) reach++; }
+                    }
+                    Log($"{map}: owner's walk {Path.GetFileName(f)}: {steps} grounded steps, on the walk grid {onGrid} ({100f * onGrid / Mathf.Max(1, steps):F0}%), reachable {reach} ({100f * reach / Mathf.Max(1, steps):F0}%)");
+                }
         }
-        foreach (var g in links.links.GroupBy(l => l.move).OrderBy(g => g.Key)) Log($"{map}: links {g.Key}: {g.Count()} (to another region {g.Count(l => !l.shortcut)}, shortcuts {g.Count(l => l.shortcut)}), best rise +{g.Max(l => l.rise):F1}, longest {g.Max(l => l.distance):F0}");
-
         // overview: all links over the reachable surface
         showLinks = true; linksObj.SetActive(true);
         var b = world.bounds; cam.orthographic = true;

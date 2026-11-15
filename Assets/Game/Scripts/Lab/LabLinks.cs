@@ -20,7 +20,7 @@ using UnityEngine.AI;
 
 public class LabLinks
 {
-    public const int Version = 6;   // bump when the search or LabSim changes: cached files of another version are ignored
+    public const int Version = 7;   // 7: the walk grid instead of the NavMesh   // bump when the search or LabSim changes: cached files of another version are ignored
 
     [System.Serializable]
     public class Link
@@ -50,7 +50,7 @@ public class LabLinks
         try
         {
             var f = JsonUtility.FromJson<File_>(File.ReadAllText(p));
-            if (f == null || f.version != Version || f.links == null || f.triangles != world.navTriangles || f.regions != world.regionCount) return false;
+            if (f == null || f.version != Version || f.links == null || f.triangles != world.cellCount || f.regions != world.regionCount) return false;
             thinned = null; links.Clear(); links.AddRange(f.links); reachable.Clear(); foreach (var r in f.reachable) reachable.Add(r);
             if (reachable.Any(r => r >= world.regionCount)) return false;
             for (int i = 0; i < links.Count; i++) links[i].id = i;
@@ -63,7 +63,7 @@ public class LabLinks
     void Save()
     {
         var p = CachePath(map); Directory.CreateDirectory(Path.GetDirectoryName(p));
-        File.WriteAllText(p, JsonUtility.ToJson(new File_ { version = Version, map = map, triangles = world.navTriangles, regions = world.regionCount, seconds = seconds, sims = sims, links = links, reachable = reachable.ToList() }));
+        File.WriteAllText(p, JsonUtility.ToJson(new File_ { version = Version, map = map, triangles = world.cellCount, regions = world.regionCount, seconds = seconds, sims = sims, links = links, reachable = reachable.ToList() }));
     }
 
     // the moves tried at every start spot: (move, run-up, extra)
@@ -100,8 +100,8 @@ public class LabLinks
             float back = RunUpLength(p);
             var from = spot - dir * back;
             if (back > 0f && (world.RegionAt(from) != region || Physics.CapsuleCast(from + Vector3.up * 2.6f, from + Vector3.up * 5.4f, 1.2f, dir, back, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore))) return -1;
-            if (!NavMesh.SamplePosition(from, out var hit, 1.5f, NavMesh.AllAreas)) return -1;
-            p.feet = hit.position; p.yaw = yaw; p.fps = LabSim.BotFps; p.maxTime = 5f;
+            if (!world.Snap(from, 1.5f, out var hitPos)) return -1;
+            p.feet = hitPos; p.yaw = yaw; p.fps = LabSim.BotFps; p.maxTime = 5f;
             var r = LabSim.Run(ghost, p); sims++;
             if (!r.landed || !r.onWalkable) return -1;   // a landing with fall damage counts too (players drop down); routes pay for the HP
             int to = world.RegionAt(r.landing);
@@ -110,7 +110,7 @@ public class LabLinks
             if (to == region)
             {
                 if (r.Rise < 1.6f && LabSim.Horizontal(r.landing - p.feet) < 12f) return -1;
-                float walk = NavMesh.CalculatePath(p.feet, r.landing, NavMesh.AllAreas, path) && path.status == NavMeshPathStatus.PathComplete ? PathLength(path) : 9999f;
+                float walk = world.WalkDistance(p.feet, r.landing); if (float.IsInfinity(walk)) walk = 9999f;
                 if (walk - LabSim.Horizontal(r.landing - p.feet) < 25f) return -1;
                 shortcut = true;
             }
@@ -126,7 +126,6 @@ public class LabLinks
             return to;
         }
 
-        Vector3 Centroid(int t) => (world.verts[world.tris[t * 3]] + world.verts[world.tris[t * 3 + 1]] + world.verts[world.tris[t * 3 + 2]]) / 3f;
 
         for (int round = 0; round < 4; round++)
         {
@@ -159,17 +158,19 @@ public class LabLinks
             // phase 2: aimed tries at what is still grey. The edge directions can miss a way in (a gap between fences, a beam end): for
             // every unreachable region near the reachable ones, from the 6 nearest reachable spots, every move aimed straight at it.
             int before = reachable.Count;
-            var reachTris = new List<int>(); for (int t = 0; t < world.tris.Length / 3; t++) if (reachable.Contains(world.triRegion[t])) reachTris.Add(t);
+            // every 3rd reachable cell is enough to aim from (cells are 1 unit)
+            var reachTris = new List<int>(); for (int t = 0; t < world.cellCount; t += 3) if (reachable.Contains(world.cellRegion[t])) reachTris.Add(t);
             var greyRegions = Enumerable.Range(0, world.regionCount).Where(r => !reachable.Contains(r) && world.regionArea[r] >= 20f).ToList();
             foreach (int u in greyRegions)
             {
                 if (reachable.Contains(u)) continue;
-                var uTris = Enumerable.Range(0, world.tris.Length / 3).Where(t => world.triRegion[t] == u).Select(Centroid).ToList();
+                var uTris = Enumerable.Range(0, world.cellCount).Where(t => world.cellRegion[t] == u).Select(t => world.cells[t]).Where((x, k) => k % 4 == 0).ToList();
+                if (uTris.Count == 0) continue;
                 // the reachable spots nearest to the region (horizontally within 60), at least 5 apart
                 var cands = new List<(Vector3 from, Vector3 at, float d)>();
                 foreach (int t in reachTris)
                 {
-                    var c = Centroid(t); Vector3 at = uTris[0]; float bd = float.MaxValue;
+                    var c = world.cells[t]; Vector3 at = uTris[0]; float bd = float.MaxValue;
                     foreach (var q in uTris) { float d = LabSim.Horizontal(q - c); if (d < bd) { bd = d; at = q; } }
                     if (bd < 60f) cands.Add((c, at, bd));
                 }
@@ -177,12 +178,12 @@ public class LabLinks
                 foreach (var c in cands.OrderBy(x => x.d)) { if (starts.All(s0 => LabSim.Horizontal(s0.from - c.from) > 5f)) starts.Add((c.from, c.at)); if (starts.Count >= 6) break; }
                 foreach (var (from0, at) in starts)
                 {
-                    if (!NavMesh.SamplePosition(from0, out var h0, 2f, NavMesh.AllAreas)) continue;
-                    int region = world.RegionAt(h0.position); if (region < 0 || !reachable.Contains(region)) continue;
-                    var to = at - h0.position; to.y = 0f; if (to.sqrMagnitude < 0.01f) continue;
+                    var h0 = from0;
+                    int region = world.RegionAt(h0); if (region < 0 || !reachable.Contains(region)) continue;
+                    var to = at - h0; to.y = 0f; if (to.sqrMagnitude < 0.01f) continue;
                     float yaw0 = Quaternion.LookRotation(to).eulerAngles.y;
                     foreach (float dy in new[] { 0f, -15f, 15f })
-                        foreach (var p in Variants(h0.position, yaw0 + dy)) { probes++; Try(p, h0.position, yaw0 + dy, region); }
+                        foreach (var p in Variants(h0, yaw0 + dy)) { probes++; Try(p, h0, yaw0 + dy, region); }
                     if (frame.Elapsed.TotalMilliseconds > frameBudgetMs)
                     {
                         state = $"добираю серые места: участков {reachable.Count}, опытов {sims}, найдено {best.Count}";
@@ -231,8 +232,6 @@ public class LabLinks
 
     const float RunSpeed = 16.12f;
 
-    float WalkTime(Vector3 a, Vector3 b, NavMeshPath path) =>
-        NavMesh.CalculatePath(a, b, NavMesh.AllAreas, path) && path.status == NavMeshPathStatus.PathComplete ? PathLength(path) / RunSpeed : float.PositiveInfinity;
 
     /// <summary>A cheap walking estimate inside one region (straight line × 1.3); the played route walks the real NavMesh path.</summary>
     static float WalkEstimate(Vector3 a, Vector3 b) => Vector3.Distance(a, b) * 1.3f / RunSpeed;

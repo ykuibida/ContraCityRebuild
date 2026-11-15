@@ -286,8 +286,8 @@ public static class LabSim
         float dt = 1f / fps, t = 0f, now = 100f;
         var start = ghost.transform.position;
         var r = new Result { start = start, dt = dt };
-        var nav = new NavMeshPath();
-        Vector3[] corners = NavMesh.CalculatePath(start, target, NavMesh.AllAreas, nav) && nav.status == NavMeshPathStatus.PathComplete ? nav.corners : new[] { start, target };
+        var gridPath = LabWorld.Current != null ? LabWorld.Current.FindPath(start, target) : null;   // the walk grid (physics), not the NavMesh
+        Vector3[] corners = gridPath != null && gridPath.Count > 1 ? gridPath.ToArray() : new[] { start, target };
         float length = 0f; for (int i = 1; i < corners.Length; i++) length += Vector3.Distance(corners[i - 1], corners[i]);
         float limit = length / 12f + 3f;
         int c = 1; float yaw = ghost.transform.eulerAngles.y;

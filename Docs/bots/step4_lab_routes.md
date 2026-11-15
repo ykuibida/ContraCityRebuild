@@ -122,3 +122,37 @@ Clean figures:
 
 Routes: 12 of 12 found and walked. The cache format is version 2, with a fingerprint of the surface, so old caches are rebuilt by
 themselves.
+
+## The walk grid replaces Unity's NavMesh (15.11.2026)
+
+**What the owner's walk on Форпост showed** (G mode, `Docs/bots/lab_walks/ArenaRing_20261115_053332.csv`):
+- 488 of his 1 773 grounded steps were on floor the NavMesh did not have at all. These were holes, not "unreachable" regions: bare
+  grey snow showed through where the overlay was missing.
+- Unity's NavMesh drops floor the fighter walks on: bumpy snow, slopes, the ground by the garages. It has its own slope limit
+  (≤ 60°), voxels and tolerances, while the fighter's CharacterController has slopeLimit 90 and stepOffset 1.5.
+
+**The fix.** `LabWorld` now builds its own walk grid with the same physics the fighter uses:
+- a column every 1 unit;
+- a ray from the top finds every floor;
+- a cell is a floor where the fighter's capsule fits standing;
+- neighbours are joined within the step or the slope the motor climbs.
+
+Regions, edges, snapping, walking paths (A* on the grid) and the bot's walking all use it.
+
+Invisible ceilings stay grey but are not drawn: grey is shown only up to a jump above the highest reachable floor. On Форпост there
+is a 30 000-cell plane at +44.
+
+**Result:**
+- **The owner's walk on Форпост:** 1 772 of 1 773 grounded steps are on the grid and reachable; before, it was 1 285.
+- **Four maps:**
+
+  | Map | Regions reachable | Jumps found | Search |
+  |---|---|---|---|
+  | Форпост | 131 | 17 222 | 5.6 min |
+  | Комиссариат | 86 | 16 595 | 5.7 min |
+  | Ангар, задний двор | 61 | 10 823 | 3.3 min |
+  | Монетный двор | 65 | 15 351 | 3.3 min |
+
+  The first opening of a new map now takes several minutes; these four are cached.
+- **Routes:** 11 of 12 walked. On Монетный двор one route ended short of its target; to look at.
+- **Spawns:** on Ангар (задний двор) 4 of 23 spawn markers are not on the grid; to look at.
