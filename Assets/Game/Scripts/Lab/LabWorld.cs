@@ -18,7 +18,7 @@ public class LabWorld
     public Bounds bounds;
     NavMeshDataInstance navInstance;
     public Mesh navMesh;
-    public float navArea, bakeMs, navMinY, navMaxY; public int navTriangles, sources, seamEdges;
+    public float navArea, bakeMs, navMinY, navMaxY; public int navTriangles, sources, seamEdges, pathJoins;
 
     // walk regions
     public Vector3[] verts; public int[] tris;          // the triangulation (welded)
@@ -207,23 +207,47 @@ public class LabWorld
             if (Vector3.Dot(outward, toC) > 0f) outward = -outward;
             open.Add((kv.Key, t, mid, outward));
         }
-        var seam = new HashSet<(int, int)>();
+        var seam = new HashSet<(int, int)>(); pathJoins = 0;
         foreach (var o in open)
         {
             int across = -1;
             foreach (float f in new[] { 0.3f, 0.7f })   // two points along the edge, so a short seam piece is not missed
             {
                 var p = Vector3.Lerp(verts[o.key.Item1], verts[o.key.Item2], f) + o.outward * 0.25f;
-                across = TriangleAt(p, 0.75f, o.tri);
+                across = TriangleAt(p, 1.5f, o.tri);   // 1.5: the agent's step; the triangulation is coarser than the ground
                 if (across >= 0) break;
             }
             if (across >= 0) { Union(o.tri, across); seam.Add(o.key); }
+        }
+        // the NavMesh's own path search is the final word on walking: islands left by the triangulation (seams on bumpy ground,
+        // detail-mesh offsets) that the NavMesh connects are joined. For every region a point on its largest triangle; regions are
+        // put together when NavMesh.CalculatePath between those points completes.
+        {
+            var roots = new Dictionary<int, int>(); var tArea = new float[n];
+            for (int t = 0; t < n; t++) { Vector3 p0 = verts[tris[t * 3]], p1 = verts[tris[t * 3 + 1]], p2 = verts[tris[t * 3 + 2]]; tArea[t] = Vector3.Cross(p1 - p0, p2 - p0).magnitude; }
+            for (int t = 0; t < n; t++) { int r = Find(t); if (!roots.TryGetValue(r, out int bt) || tArea[t] > tArea[bt]) roots[r] = t; }
+            var reps = new List<(int tri, Vector3 p, float area)>();
+            var rArea = new Dictionary<int, float>(); for (int t = 0; t < n; t++) { int r = Find(t); rArea[r] = (rArea.TryGetValue(r, out var a0) ? a0 : 0f) + tArea[t]; }
+            foreach (var kv in roots)
+            {
+                var c = (verts[tris[kv.Value * 3]] + verts[tris[kv.Value * 3 + 1]] + verts[tris[kv.Value * 3 + 2]]) / 3f;
+                if (NavMesh.SamplePosition(c, out var h, 2f, NavMesh.AllAreas)) reps.Add((kv.Value, h.position, rArea[kv.Key]));
+            }
+            reps.Sort((x, y) => y.area.CompareTo(x.area));
+            var comps = new List<(int tri, Vector3 p)>(); var navPath = new NavMeshPath();
+            foreach (var r in reps)
+            {
+                bool joined = false;
+                foreach (var c in comps)
+                    if (NavMesh.CalculatePath(r.p, c.p, NavMesh.AllAreas, navPath) && navPath.status == NavMeshPathStatus.PathComplete) { Union(r.tri, c.tri); joined = true; pathJoins++; break; }
+                if (!joined) comps.Add((r.tri, r.p));
+            }
         }
         var ids = new Dictionary<int, int>(); triRegion = new int[n];
         for (int t = 0; t < n; t++) { int r = Find(t); if (!ids.TryGetValue(r, out int id)) { id = ids.Count; ids[r] = id; } triRegion[t] = id; }
         regionCount = ids.Count; regionArea = new float[regionCount];
         for (int t = 0; t < n; t++) { Vector3 p0 = verts[tris[t * 3]], p1 = verts[tris[t * 3 + 1]], p2 = verts[tris[t * 3 + 2]]; regionArea[triRegion[t]] += Vector3.Cross(p1 - p0, p2 - p0).magnitude * 0.5f; }
-        boundary.Clear(); seamEdges = seam.Count;
+        boundary.Clear(); seamEdges = seam.Count;   // pathJoins counted above
         foreach (var o in open)
             if (!seam.Contains(o.key)) boundary.Add(new Edge { a = verts[o.key.Item1], b = verts[o.key.Item2], outward = o.outward, region = triRegion[o.tri] });
         for (int i = 0; i < markers.Count; i++)
@@ -262,7 +286,7 @@ public class LabWorld
         var q = hit.position;
         long k = ((long)Mathf.FloorToInt(q.x / GridCell) << 32) ^ (uint)Mathf.FloorToInt(q.z / GridCell);
         if (!triGrid.TryGetValue(k, out var list)) return -1;
-        int best = -1; float bestDy = 1.0f;
+        int best = -1; float bestDy = 2.0f;   // the coarse triangulation can sit ~1–2 off bumpy ground (sand, terrain)
         foreach (int t in list)
         {
             Vector3 a = verts[tris[t * 3]], b = verts[tris[t * 3 + 1]], c = verts[tris[t * 3 + 2]];

@@ -17,7 +17,7 @@ public static class LabSim
 {
     public const float BotFps = 240f;
 
-    public enum Move { Jump, RunJump, Bunnyhop, Shotgun, Rocket, RocketShotgun, Bat }
+    public enum Move { Jump, RunJump, Bunnyhop, Shotgun, Rocket, RocketShotgun, Bat, Walk }   // Walk: run straight on (onto the next piece of floor, or off a ledge)
 
     public static string RuName(Move m)
     {
@@ -25,6 +25,7 @@ public static class LabSim
         {
             case Move.Jump: return "Прыжок с места"; case Move.RunJump: return "Прыжок с разбега"; case Move.Bunnyhop: return "Распрыжка";
             case Move.Shotgun: return "Дробовик"; case Move.Rocket: return "Ракетный прыжок"; case Move.RocketShotgun: return "Ракета + дробовик";
+            case Move.Walk: return "Бег / сход с края";
             default: return "Бита + прыжки";
         }
     }
@@ -35,6 +36,7 @@ public static class LabSim
         {
             case Move.Jump: return new Color(1f, 1f, 1f); case Move.RunJump: return new Color(1f, 0.9f, 0.2f); case Move.Bunnyhop: return new Color(0.3f, 1f, 0.3f);
             case Move.Shotgun: return new Color(1f, 0.5f, 0.1f); case Move.Rocket: return new Color(1f, 0.15f, 0.15f); case Move.RocketShotgun: return new Color(0.85f, 0.2f, 1f);
+            case Move.Walk: return new Color(0.6f, 0.95f, 0.95f);
             default: return new Color(0.4f, 0.7f, 1f);
         }
     }
@@ -61,6 +63,7 @@ public static class LabSim
             switch (move)
             {
                 case Move.Jump: return "прыжок с места";
+                case Move.Walk: return $"просто бег вперёд {runUp:F1} с (на соседний кусок пола или вниз с края)";
                 case Move.RunJump: return run + "прыжок";
                 case Move.Bunnyhop: return run + $"распрыжка, {hops} прыжка";
                 case Move.Bat: return "бита в руке, " + run + $"{hops} прыжка";
@@ -78,6 +81,7 @@ public static class LabSim
         public readonly List<Vector3> path = new List<Vector3>();
         public readonly List<Vector2> views = new List<Vector2>();   // yaw, pitch per step (for the "bot's eyes" camera)
         public readonly List<bool> air = new List<bool>();
+        public readonly List<WeaponType> weapons = new List<WeaponType>();   // in hand, per step (the fighter model shows it)
         public readonly List<Event> events = new List<Event>();
         public float dt;
         public Vector3 start, takeoff, landing; public float takeoffT = -1f, landingT = -1f, time;
@@ -177,8 +181,10 @@ public static class LabSim
         bool chain = p.move == Move.Bunnyhop || p.move == Move.Bat || shotgun;
         int jumpsWanted = p.move == Move.Bunnyhop || p.move == Move.Bat ? Mathf.Max(1, p.hops) : 1;
         float takeoffAt = -1f; int frame = 0;
-        float jumpAt = p.move == Move.Jump || p.runUp <= 0.01f ? 0.02f : p.runUp;
-        r.path.Add(p.feet); r.views.Add(new Vector2(viewYaw, 0f)); r.air.Add(false);
+        bool walk = p.move == Move.Walk;
+        float jumpAt = walk ? float.MaxValue : p.move == Move.Jump || p.runUp <= 0.01f ? 0.02f : p.runUp;
+        var holding = inHand != null ? inHand.Type : WeaponType.MACHINE_GUN;
+        r.path.Add(p.feet); r.views.Add(new Vector2(viewYaw, 0f)); r.air.Add(false); r.weapons.Add(holding);
 
         while (t < p.maxTime)
         {
@@ -186,7 +192,8 @@ public static class LabSim
             bool forward = p.move != Move.Jump && !backwards;
             bool back = backwards && (p.runUp > 0.01f || airborne || takeoffs > 0);
             bool jump;
-            if (!chain) jump = t >= jumpAt && t < jumpAt + 0.25f;
+            if (walk) jump = false;
+            else if (!chain) jump = t >= jumpAt && t < jumpAt + 0.25f;
             else if (t < jumpAt) jump = false;
             else if (!airborne) jump = takeoffs == 0 || more;
             else jump = t - takeoffAt < 0.1f || (more && (frame & 1) == 0);
@@ -206,7 +213,7 @@ public static class LabSim
                     rocketBlowAt = t + (shot.LandingTimeStamp - shot.TimeStamp + 150) / 1000f;
                     r.events.Add(new Event { t = t, what = $"ракета под ноги, взрыв через {rocketBlowAt - t:F2} с", at = rocketAt });
                     rocketsLeft--;
-                    if (shotsLeft > 0) { nextShot = t + 0.5f; SetWeapon(ghost, sg); r.events.Add(new Event { t = t, what = "смена на дробовик (0.5 с)", at = ghost.transform.position }); }
+                    if (shotsLeft > 0) { nextShot = t + 0.5f; SetWeapon(ghost, sg); holding = WeaponType.SHOT_GUN; r.events.Add(new Event { t = t, what = "смена на дробовик (0.5 с)", at = ghost.transform.position }); }
                 }
                 else if (!m.grounded)
                 {
@@ -234,7 +241,7 @@ public static class LabSim
             m.Step(dt, now);
             t += dt; now += dt;
             var pos = ghost.transform.position;
-            r.path.Add(pos); r.views.Add(new Vector2(viewYaw, pitchNow)); r.air.Add(!m.grounded);
+            r.path.Add(pos); r.views.Add(new Vector2(viewYaw, pitchNow)); r.air.Add(!m.grounded); r.weapons.Add(holding);
             if (pitchNow > 0f && t > nextShot - 0.3f && rocketsLeft == 0 && shotsLeft == 0) pitchNow = Mathf.MoveTowards(pitchNow, 0f, 200f * dt);
             peakY = Mathf.Max(peakY, pos.y);
             if (m.movement.velocity.y < 0f) r.maxDownSpeed = Mathf.Max(r.maxDownSpeed, -m.movement.velocity.y);
@@ -252,7 +259,9 @@ public static class LabSim
                 bool finished = shotgun ? shotsLeft == 0 && rocketsLeft == 0 : takeoffs >= jumpsWanted && rocketsLeft == 0;
                 if (finished && rocketBlowAt < 0f) { r.landed = true; r.landing = pos; r.landingT = t; break; }
             }
-            if (takeoffs == 0 && t > jumpAt + 1f) break;   // never left the ground
+            // walking: done once the run time is over and the fighter stands (after a fall off a ledge, when it lands)
+            if (walk && t >= p.runUp && m.grounded) { r.landed = true; r.landing = pos; r.landingT = t; if (r.takeoffT < 0f) { r.takeoff = p.feet; r.takeoffT = 0f; } break; }
+            if (!walk && takeoffs == 0 && t > jumpAt + 1f) break;   // never left the ground
         }
         r.time = t;
         r.maxRise = peakY - p.feet.y;
@@ -282,7 +291,7 @@ public static class LabSim
         float length = 0f; for (int i = 1; i < corners.Length; i++) length += Vector3.Distance(corners[i - 1], corners[i]);
         float limit = length / 12f + 3f;
         int c = 1; float yaw = ghost.transform.eulerAngles.y;
-        r.path.Add(start); r.views.Add(new Vector2(yaw, 0f)); r.air.Add(false);
+        r.path.Add(start); r.views.Add(new Vector2(yaw, 0f)); r.air.Add(false); r.weapons.Add(WeaponType.MACHINE_GUN);
         while (t < limit)
         {
             var pos = ghost.transform.position;
@@ -294,7 +303,7 @@ public static class LabSim
             s.Step(SoldierController.Keys.Moves(false, false, true, false), dt, now);
             m.Step(dt, now);
             t += dt; now += dt;
-            r.path.Add(ghost.transform.position); r.views.Add(new Vector2(yaw, 0f)); r.air.Add(!m.grounded);
+            r.path.Add(ghost.transform.position); r.views.Add(new Vector2(yaw, 0f)); r.air.Add(!m.grounded); r.weapons.Add(WeaponType.MACHINE_GUN);
         }
         r.time = t; r.landing = ghost.transform.position;
         return r;

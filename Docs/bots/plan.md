@@ -116,6 +116,22 @@ below:
 - Rocket jumps matter less than shotgun jumps but must be there. Players right after spawning (still invulnerable) often fire a
   rocket under themselves to fly off. Combos too: a rocket first, then shotgun shots in the air.
 
+## Rockets for movement: a rare exception (owner, 15.11.2026)
+
+A rocket under your own feet is a very rare move, or the bots blow themselves up. It is used only when:
+- **Right after a respawn, while invulnerable** (no self-damage): on open maps, to boost forward, jump high, get somewhere, or land
+  on an enemy from above. On Монетный двор the owner did this all the time: nobody camps you on the spawn, you fly forward, you
+  surprise the enemy from above.
+- **There is no other way** to a strong spot (high ground) and the bot has a lot of HP and a launcher with little self-damage
+  («Аврора»).
+
+Never with heavy self-damage launchers such as «Троллебузина» (RL_RPG7B02: 90 damage; its push is ÷3 in EffectManager) or
+«Пучкомёт». The rule depends on each launcher's self-damage, so the weapon data must give it.
+
+Not in the rebuild's item data: «Аврора» (and «Пучкомёт» under that name). Its self-damage is to be found.
+
+In the lab, rockets are priced as "only when nothing else works". Bots get the full rule (invulnerability, HP, launcher) in step 10.
+
 ## Map lab (owner, 12.11.2026)
 
 The working tool for stage A is a lab inside Unity, not a web page: only the real motor gives 1:1 jumps.

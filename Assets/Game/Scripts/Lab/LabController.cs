@@ -89,6 +89,83 @@ public class LabController : MonoBehaviour
     Vector3? startPt, targetPt; LabLinks.Route route; LabSim.Result played; string routeText = "";
     float playT; float speed = 1f; int camMode = 1;   // 0 free, 1 behind the bot, 2 the bot's eyes
     string marksNote = "", snapNote = "";
+    int allowedMask = ~0;   // bit per LabSim.Move: which moves the routes and the drawn jumps may use
+    BodyWeapons fighterWeapons; WeaponType shownWeapon = WeaponType.NONE;
+
+    // ---- walk yourself (G): the owner plays a normal fighter; the steps show where the lab is wrong and teach it ----
+    GameObject walker; float walkNext; readonly List<(Vector3 p, bool grounded, int region, float t)> walkLog = new List<(Vector3, bool, int, float)>();
+    LineRenderer walkGood, walkBad; int walkLearned; string walkNote = "";
+    readonly List<Vector3> walkGoodPts = new List<Vector3>(), walkBadPts = new List<Vector3>();
+
+    void StartWalk()
+    {
+        if (walker) return;
+        Vector3 feet; float yaw = cam.transform.eulerAngles.y;
+        if (startPt != null) feet = startPt.Value;
+        else
+        {
+            var ray = cam.ScreenPointToRay(new Vector3(Screen.width / 2f, Screen.height / 2f));
+            feet = Physics.Raycast(ray, out var h, 3000f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore) ? h.point : world.markers.First(m => LabWorld.IsSpawn(m.kind)).position;
+        }
+        ClearRoute();
+        walker = PlayerRig.Create(feet + Vector3.up * 0.5f, yaw, cam);
+        cam.enabled = false; var fly = cam.GetComponent<FlyCamera>(); if (fly) fly.enabled = false;
+        var al = cam.GetComponent<AudioListener>(); if (al) al.enabled = false;
+        Cursor.lockState = CursorLockMode.Locked; Cursor.visible = false;
+        walkLog.Clear(); walkGoodPts.Clear(); walkBadPts.Clear(); walkLearned = 0; walkNote = "";
+        if (walkGood) Destroy(walkGood.gameObject); if (walkBad) Destroy(walkBad.gameObject);
+    }
+
+    void StopWalk()
+    {
+        if (!walker) return;
+        var last = walker.transform.position;
+        Destroy(walker); walker = null;
+        cam.enabled = true; var fly = cam.GetComponent<FlyCamera>(); if (fly) fly.enabled = true;
+        var al = cam.GetComponent<AudioListener>(); if (al) al.enabled = true;
+        cam.transform.position = last + Vector3.up * 14f - cam.transform.forward * 12f; SyncFly();
+        Cursor.lockState = CursorLockMode.None; Cursor.visible = true;
+        // learn: every grounded step from a reachable region into another region is a proven walk link
+        int greyPoints = walkLog.Count(x => x.grounded && x.region >= 0 && !links.reachable.Contains(x.region));
+        for (int i = 1; i < walkLog.Count; i++)
+        {
+            var a = walkLog[i - 1]; var b = walkLog[i];
+            if (!a.grounded || !b.grounded || a.region < 0 || b.region < 0 || a.region == b.region) continue;
+            if (links.AddObserved(a.p, b.p, b.t - a.t)) walkLearned++;
+        }
+        // regions reachable through the newly learned links in turn (the owner walked on through them)
+        bool grew = true; while (grew) { grew = false; foreach (var l in links.links.Where(l => l.observed)) if (links.reachable.Contains(l.fromRegion) && links.reachable.Add(l.toRegion)) { grew = true; walkLearned++; } }
+        if (walkLearned > 0) { world.BuildMesh(links.reachable); }
+        SaveWalk(greyPoints);
+        walkNote = $"Записано {walkLog.Count} шагов. По серому ты прошёл {greyPoints} шагов: это ошибки лаборатории. Новых доступных участков после твоего прохода: {walkLearned}.";
+    }
+
+    void RecordWalk()
+    {
+        if (!walker || Time.time < walkNext) return;
+        walkNext = Time.time + 0.1f;
+        var m = walker.GetComponent<CharacterMotor>(); var p = walker.transform.position;
+        int r = m.grounded ? world.RegionAt(p, 2f) : -1;
+        walkLog.Add((p, m.grounded, r, Time.time));
+        if (!m.grounded) return;
+        bool ok = r >= 0 && links.reachable.Contains(r);
+        (ok ? walkGoodPts : walkBadPts).Add(p + Vector3.up * 0.3f);
+        if (walkGood) Destroy(walkGood.gameObject); if (walkBad) Destroy(walkBad.gameObject);
+        if (walkGoodPts.Count > 1) walkGood = LabDraw.Line("WalkGood", walkGoodPts, new Color(0.3f, 1f, 0.3f), 0.5f, routeRoot);
+        if (walkBadPts.Count > 1) walkBad = LabDraw.Line("WalkBad", walkBadPts, new Color(1f, 0.2f, 0.2f), 0.7f, routeRoot);
+    }
+
+    void SaveWalk(int greyPoints)
+    {
+        var projectDocs = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "..", "Docs", "bots"));
+        var dir = Directory.Exists(projectDocs) ? Path.Combine(projectDocs, "lab_walks") : Path.Combine(Path.GetDirectoryName(Application.dataPath), "LabData", "walks");
+        Directory.CreateDirectory(dir);
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"# {map} {System.DateTime.Now:yyyy-MM-dd HH:mm}: {walkLog.Count} steps, {greyPoints} grounded steps on grey, learned {walkLearned}");
+        sb.AppendLine("t,x,y,z,grounded,region,reachable");
+        foreach (var s in walkLog) sb.AppendLine($"{s.t:F2},{s.p.x:F2},{s.p.y:F2},{s.p.z:F2},{(s.grounded ? 1 : 0)},{s.region},{(s.region >= 0 && links.reachable.Contains(s.region) ? 1 : 0)}");
+        File.WriteAllText(Path.Combine(dir, $"{map}_{System.DateTime.Now:yyyyMMdd_HHmmss}.csv"), sb.ToString());
+    }
 
     IEnumerator Start()
     {
@@ -165,6 +242,11 @@ public class LabController : MonoBehaviour
             foreach (var kv in Profile.Current.EquippedWear) { var wi = ItemDB.Get(ItemKind.Wear, kv.Value); if (wi != null) outfit[kv.Key] = wi; }
             Dresser.Dress(f, outfit);
             var a = f.GetComponentInChildren<Animation>(); if (a && a["Idle"] != null) a.CrossFade("Idle");
+            // the weapons, as the stage 5 body: the bot shows what it jumps with (shotgun, rocket launcher, bat, rifle when running)
+            var ba = f.AddComponent<BodyAnimator>(); ba.Anim = a;
+            fighterWeapons = f.AddComponent<BodyWeapons>(); fighterWeapons.Animator = ba;
+            foreach (var kv in BattleWeapons.Build(Profile.Current)) fighterWeapons.InitWeapon(kv.Key, kv.Value);
+            shownWeapon = WeaponType.NONE;
         }
         else LabDraw.Primitive(PrimitiveType.Capsule, "Body", Vector3.up * 3.65f, new Vector3(2.6f, 3.25f, 2.6f), new Color(0.6f, 1f, 0.6f, 0.6f), holder.transform);
         holder.SetActive(false);
@@ -221,18 +303,18 @@ public class LabController : MonoBehaviour
     {
         if (nearObj) Destroy(nearObj);
         int r = world.RegionAt(p, 3f);
-        var near = links.links.Where(l => l.fromRegion == r && LabSim.Horizontal(l.from - p) < 15f).ToList();
+        var near = links.links.Where(l => l.fromRegion == r && Allowed(l.move) && LabSim.Horizontal(l.from - p) < 15f).ToList();
         nearObj = LabDraw.Lines("Near", near.Select(l => ((IList<Vector3>)l.path, LabSim.ColorOf(l.move))), routeRoot);
         routeText = r < 0 ? "Здесь нет проходимой поверхности: щёлкни на пол, ящик, крышу." : near.Count > 0 ? $"Отсюда рядом {near.Count} прыжков (цветные дуги). Теперь щёлкни, куда боту нужно попасть." : "Рядом прыжков нет. Теперь щёлкни, куда боту нужно попасть.";
     }
 
     void MakeRoute()
     {
-        route = links.FindRoute(startPt.Value, targetPt.Value);
+        route = links.FindRoute(startPt.Value, targetPt.Value, allowedMask);
         if (route == null)
         {
             int ra = world.RegionAt(startPt.Value, 3f), rb = world.RegionAt(targetPt.Value, 3f);
-            routeText = ra < 0 || rb < 0 ? "Точка не на проходимой поверхности." : !links.reachable.Contains(rb) ? "Туда не попасть ни бегом, ни найденными прыжками (серая зона)." : "Пути не найдено.";
+            routeText = ra < 0 || rb < 0 ? "Точка не на проходимой поверхности." : !links.reachable.Contains(rb) ? "Туда не попасть ни бегом, ни найденными прыжками (серая зона)." : "Пути не найдено. Возможно, нужен приём, который сейчас выключен.";
             return;
         }
         played = links.Play(route, startPt.Value);
@@ -241,7 +323,19 @@ public class LabController : MonoBehaviour
         LabDraw.Line("RoutePath", played.path.Where((x, i) => i % 6 == 0).Select(x => x + Vector3.up * 0.5f).ToList(), new Color(1f, 1f, 1f), 0.35f, routeRoot);
         foreach (var leg in route.legs.Where(l => l.link != null))
             LabDraw.Line("RouteJump", leg.link.path.Select(x => x + Vector3.up * 0.6f).ToList(), LabSim.ColorOf(leg.link.move), 0.6f, routeRoot);
-        playT = 0f; if (fighter) fighter.SetActive(true); marksNote = "";
+        playT = 0f; if (fighter) fighter.SetActive(true); marksNote = ""; shownWeapon = WeaponType.NONE;
+    }
+
+    bool Allowed(LabSim.Move m) => (allowedMask & (1 << (int)m)) != 0;
+
+    /// <summary>After the move filter changed: redraw the jumps and rebuild the route on screen.</summary>
+    void FilterChanged()
+    {
+        if (linksObj) Destroy(linksObj);
+        linksObj = LabDraw.Lines("Links", links.links.Where(l => Allowed(l.move)).Select(l => ((IList<Vector3>)l.path, LabSim.ColorOf(l.move))), root);
+        linksObj.SetActive(showLinks);
+        if (startPt != null && targetPt != null) { var a = startPt; var b = targetPt; foreach (Transform t in routeRoot) if (!t.name.StartsWith("Flag")) Destroy(t.gameObject); MakeRoute(); }
+        else if (startPt != null) ShowNear(startPt.Value);
     }
 
     void SaveMark(bool real)
@@ -270,11 +364,13 @@ public class LabController : MonoBehaviour
         if (linksObj) linksObj.SetActive(showLinks);
         if (automated) return;
         bool overUi = new Rect(0, 0, 380, Screen.height).Contains(new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y));
-        if (Input.GetMouseButtonDown(0) && !overUi && !searching)
+        if (Input.GetMouseButtonDown(0) && !overUi && !searching && !walker)
         {
             var ray = cam.ScreenPointToRay(Input.mousePosition);
             if (Physics.Raycast(ray, out var hit, 3000f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore)) Pick(hit.point);
         }
+        if (Input.GetKeyDown(KeyCode.G)) { if (walker) StopWalk(); else StartWalk(); }
+        if (walker) { RecordWalk(); return; }
         if (Input.GetKeyDown(KeyCode.Escape)) ClearRoute();
         AnimateFighter(Time.deltaTime * speed);
     }
@@ -306,6 +402,15 @@ public class LabController : MonoBehaviour
         var p = played.path[i]; var v = played.views[i];
         var vel = i > 0 ? (played.path[i] - played.path[i - 1]) / played.dt : Vector3.zero; vel.y = 0f;
         fighter.transform.position = p;
+        if (fighterWeapons != null && played.weapons.Count > i && played.weapons[i] != shownWeapon && fighter.activeInHierarchy)
+        {
+            for (int sl = 1; sl <= BodyWeapons.WeaponNum; sl++)
+            {
+                var w = fighterWeapons.GetWeapon(sl);
+                if (w != null && w.Type == played.weapons[i]) { fighterWeapons.OnChangeWeapon(sl); break; }
+            }
+            shownWeapon = played.weapons[i];
+        }
         fighter.transform.rotation = Quaternion.Euler(0f, v.x, 0f);   // the body faces where the bot looks (backwards runs for shotgun jumps)
         var anim = fighter.GetComponentInChildren<Animation>();
         if (!anim) return;
@@ -331,6 +436,13 @@ public class LabController : MonoBehaviour
         GUILayout.Label($"<b>Лаборатория</b> — {(RuMap.TryGetValue(map ?? "", out var ru) ? ru : map)}", big);
         if (searching) { GUILayout.Label($"Ищу прыжки по всей карте: {links.progress * 100f:F0}%\n{links.state}\n\nОдин раз для карты, дальше берётся из кеша.", label); GUILayout.EndArea(); return; }
         if (!ready) { GUILayout.Label(status, label); GUILayout.EndArea(); return; }
+        if (walker)
+        {
+            GUILayout.Label("<b>Ты идёшь сам</b> (обычный боец: WASD, мышь, пробел).\nЗелёный след — лаборатория знала, что сюда можно. <color=#ff5555><b>Красный</b></color> — она считала, что нельзя.\n<b>G</b> — закончить и сохранить.", label);
+            GUILayout.EndArea(); return;
+        }
+        if (GUILayout.Button("Пройтись самому (G)", GUILayout.Height(26))) StartWalk();
+        if (walkNote != "") GUILayout.Label(walkNote, small);
         GUILayout.Label("<b>1.</b> Щёлкни левой кнопкой, <b>откуда</b> бот стартует.\n<b>2.</b> Щёлкни, <b>куда</b> ему нужно попасть.\nБот сам найдёт путь с прыжками и пройдёт его.", label);
         GUILayout.Space(4);
         if (routeText != "") GUILayout.Label(routeText + snapNote, small);
@@ -356,11 +468,28 @@ public class LabController : MonoBehaviour
         }
         if (startPt != null && GUILayout.Button("Сбросить (Esc)")) ClearRoute();
         GUILayout.FlexibleSpace();
+        GUILayout.Label("<b>Бот может использовать</b>", small);
+        {
+            var moves = (LabSim.Move[])System.Enum.GetValues(typeof(LabSim.Move)); int before = allowedMask;
+            for (int i = 0; i < moves.Length; i += 2)
+            {
+                GUILayout.BeginHorizontal();
+                for (int j = i; j < Mathf.Min(i + 2, moves.Length); j++)
+                {
+                    var m = moves[j]; bool on = Allowed(m);
+                    bool now = GUILayout.Toggle(on, $"<color=#{ColorUtility.ToHtmlStringRGB(LabSim.ColorOf(m))}>■</color> {LabSim.RuName(m).ToLowerInvariant()}", new GUIStyle(GUI.skin.toggle) { richText = true, fontSize = 12 }, GUILayout.Width(170));
+                    if (now != on) allowedMask ^= 1 << (int)m;
+                }
+                GUILayout.EndHorizontal();
+            }
+            if (GUILayout.Button("Без ракет")) allowedMask &= ~((1 << (int)LabSim.Move.Rocket) | (1 << (int)LabSim.Move.RocketShotgun));
+            if (allowedMask != before) FilterChanged();
+        }
         GUILayout.Label("<b>Показывать</b>", small);
         GUILayout.BeginHorizontal();
         showNav = GUILayout.Toggle(showNav, "поверхность"); showLinks = GUILayout.Toggle(showLinks, "все прыжки"); showMarkers = GUILayout.Toggle(showMarkers, "метки");
         GUILayout.EndHorizontal();
-        GUILayout.Label(Legend(), small);
+        GUILayout.Label("Поверхность: голубая — низ, малиновая — верх, серая — туда не попасть.", small);
         GUILayout.Label($"<color=#aaaaaa>{status}</color>", small);
         GUILayout.Label("<color=#aaaaaa>Камера: правая кнопка + WASD, Q / E, Shift — быстрее.</color>", small);
         GUILayout.EndArea();
@@ -384,10 +513,32 @@ public class LabController : MonoBehaviour
 
     IEnumerator AutoTest()
     {
-        Log($"=== {map}: walkable {world.navArea:F0} sq units, {world.navTriangles} triangles, {world.regionCount} regions ({world.seamEdges} tile-seam edges joined), baked in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
+        Log($"=== {map}: walkable {world.navArea:F0} sq units, {world.navTriangles} triangles, {world.regionCount} regions ({world.seamEdges} tile-seam edges, {world.pathJoins} NavMesh-path joins), baked in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
         float reachArea = links.reachable.Sum(r => world.regionArea[r]);
         Log($"{map}: reachable from the spawns {links.reachable.Count} regions, {reachArea:F0} sq units ({100f * reachArea / Mathf.Max(1f, world.navArea):F0}% of the surface); spawns on the surface {world.markers.Count(m => LabWorld.IsSpawn(m.kind) && m.region >= 0)}/{world.markers.Count(m => LabWorld.IsSpawn(m.kind))}");
         Log($"{map}: search {links.state}; base gate colliders opened {gatesOpened}, automatic doors opened {doorsOpened}");
+        // diagnostics: the biggest grey (unreachable) regions — where they are, what is above them, how they meet the reachable ones
+        {
+            var reachTris = new List<int>(); for (int t = 0; t < world.tris.Length / 3; t++) if (links.reachable.Contains(world.triRegion[t])) reachTris.Add(t);
+            Vector3 C(int t) => (world.verts[world.tris[t * 3]] + world.verts[world.tris[t * 3 + 1]] + world.verts[world.tris[t * 3 + 2]]) / 3f;
+            var spawnP = world.markers.First(m => LabWorld.IsSpawn(m.kind) && m.region >= 0).position;
+            var np = new UnityEngine.AI.NavMeshPath();
+            var grey = Enumerable.Range(0, world.regionCount).Where(r => !links.reachable.Contains(r)).OrderByDescending(r => world.regionArea[r]).Take(12).ToList();
+            foreach (int r in grey)
+            {
+                var rt = Enumerable.Range(0, world.tris.Length / 3).Where(t => world.triRegion[t] == r).ToList();
+                var big = rt.OrderByDescending(t => Vector3.Cross(world.verts[world.tris[t * 3 + 1]] - world.verts[world.tris[t * 3]], world.verts[world.tris[t * 3 + 2]] - world.verts[world.tris[t * 3]]).magnitude).First();
+                var c = C(big);
+                float up = Physics.Raycast(c + Vector3.up * 0.5f, Vector3.up, out var hu, 50f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore) ? hu.distance + 0.5f : 99f;
+                string upName = up < 99f ? hu.collider.name : "-";
+                bool down = Physics.Raycast(c + Vector3.up * 2f, Vector3.down, out var hd, 6f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore);
+                float nearH = 999f, nearV = 0f;
+                foreach (int t in reachTris) { var d = C(t) - c; float h = new Vector2(d.x, d.z).magnitude; if (h < nearH) { nearH = h; nearV = d.y; } }
+                bool sp = UnityEngine.AI.NavMesh.SamplePosition(c, out var sh, 2f, UnityEngine.AI.NavMesh.AllAreas);
+                var st = UnityEngine.AI.NavMesh.CalculatePath(sp ? sh.position : c, spawnP, UnityEngine.AI.NavMesh.AllAreas, np) ? np.status.ToString() : "fail";
+                Log($"{map}: grey region {r}: area {world.regionArea[r]:F0}, {rt.Count} tris, at {c}, ceiling {up:F1} ({upName}), floor collider {(down ? hd.collider.name + " " + LayerMask.LayerToName(hd.collider.gameObject.layer) : "-")}, nearest reachable {nearH:F1} away, dy {nearV:+0.0;-0.0}, sample {(sp ? (sh.position - c).ToString() : "none")}, path to spawn {st}");
+            }
+        }
         foreach (var g in links.links.GroupBy(l => l.move).OrderBy(g => g.Key)) Log($"{map}: links {g.Key}: {g.Count()} (to another region {g.Count(l => !l.shortcut)}, shortcuts {g.Count(l => l.shortcut)}), best rise +{g.Max(l => l.rise):F1}, longest {g.Max(l => l.distance):F0}");
 
         // overview: all links over the reachable surface
@@ -428,6 +579,14 @@ public class LabController : MonoBehaviour
                 yield return Shot($"lab_{map}_route_eyes");
             }
             n++;
+        }
+        // the same first target without rockets (the owner's filter)
+        if (targets.Count > 0)
+        {
+            allowedMask = ~((1 << (int)LabSim.Move.Rocket) | (1 << (int)LabSim.Move.RocketShotgun));
+            ClearRoute(); startPt = spawn.position; targetPt = targets[0].to; DrawFlags(); MakeRoute();
+            Log($"{map}: route 0 without rockets: {(route == null ? "none: " + routeText : $"{route.legs.Count(l => l.link != null)} jumps, {routeText}")}");
+            allowedMask = ~0;
         }
         ClearRoute();
         Log($"{map}: done");

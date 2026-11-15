@@ -20,13 +20,13 @@ using UnityEngine.AI;
 
 public class LabLinks
 {
-    public const int Version = 2;   // bump when the search or LabSim changes: cached files of another version are ignored
+    public const int Version = 6;   // bump when the search or LabSim changes: cached files of another version are ignored
 
     [System.Serializable]
     public class Link
     {
         public LabSim.Move move; public Vector3 from, to; public float yaw, runUp, pitch, fireDelay; public int hops, shots; public bool backwards;
-        public float time, rise, peak, distance; public int fromRegion, toRegion; public bool shortcut;
+        public float time, rise, peak, distance; public int fromRegion, toRegion, fallDamage; public bool shortcut, observed;
         public Vector3[] path;   // decimated, for drawing
         [System.NonSerialized] public int id;
         public LabSim.Params Params() => new LabSim.Params { move = move, feet = from, yaw = yaw, runUp = runUp, pitch = pitch, fireDelay = fireDelay, hops = hops, shots = shots, backwards = backwards, fps = LabSim.BotFps };
@@ -69,6 +69,7 @@ public class LabLinks
     // the moves tried at every start spot: (move, run-up, extra)
     static IEnumerable<LabSim.Params> Variants(Vector3 feet, float yaw)
     {
+        yield return new LabSim.Params { move = LabSim.Move.Walk, runUp = 1.2f };   // onto the next piece of floor / off a ledge (the real motor decides)
         yield return new LabSim.Params { move = LabSim.Move.Jump, runUp = 0f };
         yield return new LabSim.Params { move = LabSim.Move.RunJump, runUp = 0.6f };
         yield return new LabSim.Params { move = LabSim.Move.Bunnyhop, runUp = 0.6f, hops = 2 };
@@ -80,7 +81,7 @@ public class LabLinks
     }
 
     /// <summary>Distance covered by the run-up before the jump (the run starts this far behind the start spot).</summary>
-    static float RunUpLength(LabSim.Params p) => p.runUp <= 0.01f ? 0f : p.runUp * (p.move == LabSim.Move.Bat ? 20f : 16f) * 0.85f;
+    static float RunUpLength(LabSim.Params p) => p.runUp <= 0.01f || p.move == LabSim.Move.Walk ? 0f : p.runUp * (p.move == LabSim.Move.Bat ? 20f : 16f) * 0.85f;
 
     public IEnumerator Search(float frameBudgetMs = 25f)
     {
@@ -89,69 +90,128 @@ public class LabLinks
         var queue = new Queue<int>();
         foreach (var m in world.markers) if (LabWorld.IsSpawn(m.kind) && m.region >= 0 && reachable.Add(m.region)) queue.Enqueue(m.region);
         var best = new Dictionary<(int, int, int, int, int, int), Link>();
-        int edgesDone = 0, edgesTotal = world.boundary.Count;
+        int edgesDone = 0, edgesTotal = world.boundary.Count, probes = 0;
         var path = new NavMeshPath();
-        while (queue.Count > 0)
+
+        // one try: the move p from the spot `spot` of region `region` in the direction yaw; a good landing becomes a link
+        int Try(LabSim.Params p, Vector3 spot, float yaw, int region)
         {
-            int region = queue.Dequeue();
-            foreach (var e in world.boundary.Where(x => x.region == region))
+            var dir = Quaternion.Euler(0f, yaw, 0f) * Vector3.forward;
+            float back = RunUpLength(p);
+            var from = spot - dir * back;
+            if (back > 0f && (world.RegionAt(from) != region || Physics.CapsuleCast(from + Vector3.up * 2.6f, from + Vector3.up * 5.4f, 1.2f, dir, back, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore))) return -1;
+            if (!NavMesh.SamplePosition(from, out var hit, 1.5f, NavMesh.AllAreas)) return -1;
+            p.feet = hit.position; p.yaw = yaw; p.fps = LabSim.BotFps; p.maxTime = 5f;
+            var r = LabSim.Run(ghost, p); sims++;
+            if (!r.landed || !r.onWalkable) return -1;   // a landing with fall damage counts too (players drop down); routes pay for the HP
+            int to = world.RegionAt(r.landing);
+            if (to < 0) return -1;
+            bool shortcut = false;
+            if (to == region)
             {
-                edgesDone++;
-                float len = LabSim.Horizontal(e.b - e.a); int samples = Mathf.Max(1, Mathf.RoundToInt(len / 5f));
-                for (int si = 0; si < samples; si++)
+                if (r.Rise < 1.6f && LabSim.Horizontal(r.landing - p.feet) < 12f) return -1;
+                float walk = NavMesh.CalculatePath(p.feet, r.landing, NavMesh.AllAreas, path) && path.status == NavMeshPathStatus.PathComplete ? PathLength(path) : 9999f;
+                if (walk - LabSim.Horizontal(r.landing - p.feet) < 25f) return -1;
+                shortcut = true;
+            }
+            var link = new Link
+            {
+                move = p.move, from = p.feet, to = r.landing, yaw = yaw, runUp = p.runUp, pitch = p.pitch, fireDelay = p.fireDelay, hops = p.hops, shots = p.shots, backwards = p.backwards,
+                time = r.time, rise = r.Rise, peak = r.maxRise, distance = LabSim.Horizontal(r.landing - p.feet), fromRegion = region, toRegion = to, shortcut = shortcut, fallDamage = r.fallDamage,
+                path = r.path.Where((x, k) => k % 24 == 0 || k == r.path.Count - 1).ToArray(),
+            };
+            var key = (Mathf.RoundToInt(p.feet.x / 6f), Mathf.RoundToInt(p.feet.z / 6f), Mathf.RoundToInt(r.landing.x / 4f), Mathf.RoundToInt(r.landing.y / 2f), Mathf.RoundToInt(r.landing.z / 4f), region);
+            if (!best.TryGetValue(key, out var old) || link.time + Cost(link) < old.time + Cost(old)) best[key] = link;
+            if (reachable.Add(to)) queue.Enqueue(to);
+            return to;
+        }
+
+        Vector3 Centroid(int t) => (world.verts[world.tris[t * 3]] + world.verts[world.tris[t * 3 + 1]] + world.verts[world.tris[t * 3 + 2]]) / 3f;
+
+        for (int round = 0; round < 4; round++)
+        {
+            // phase 1: from the edges of every reachable region, three directions per spot
+            while (queue.Count > 0)
+            {
+                int region = queue.Dequeue();
+                foreach (var e in world.boundary.Where(x => x.region == region))
                 {
-                    var onEdge = Vector3.Lerp(e.a, e.b, (si + 0.5f) / samples);
-                    // just inside the edge: 1.6 where there is room (the fighter's radius 1.3 + a little), else 0.4 (a pipe, a beam)
-                    var spot = onEdge - e.outward * 1.6f;
-                    if (world.RegionAt(spot) != region) { spot = onEdge - e.outward * 0.4f; if (world.RegionAt(spot) != region) continue; }
-                    float baseYaw = Quaternion.LookRotation(e.outward).eulerAngles.y;
-                    foreach (float dy in new[] { 0f, -30f, 30f })
+                    edgesDone++;
+                    float len = LabSim.Horizontal(e.b - e.a); int samples = Mathf.Max(1, Mathf.RoundToInt(len / 5f));
+                    for (int si = 0; si < samples; si++)
                     {
-                        float yaw = baseYaw + dy; var dir = Quaternion.Euler(0f, yaw, 0f) * Vector3.forward;
-                        foreach (var p in Variants(spot, yaw))
+                        var onEdge = Vector3.Lerp(e.a, e.b, (si + 0.5f) / samples);
+                        // just inside the edge: 1.6 where there is room (the fighter's radius 1.3 + a little), else 0.4 (a pipe, a beam)
+                        var spot = onEdge - e.outward * 1.6f;
+                        if (world.RegionAt(spot) != region) { spot = onEdge - e.outward * 0.4f; if (world.RegionAt(spot) != region) continue; }
+                        float baseYaw = Quaternion.LookRotation(e.outward).eulerAngles.y;
+                        foreach (float dy in new[] { 0f, -30f, 30f })
+                            foreach (var p in Variants(spot, baseYaw + dy)) Try(p, spot, baseYaw + dy, region);
+                        if (frame.Elapsed.TotalMilliseconds > frameBudgetMs)
                         {
-                            float back = RunUpLength(p);
-                            var from = spot - dir * back;
-                            if (back > 0f && (world.RegionAt(from) != region || Physics.CapsuleCast(from + Vector3.up * 2.6f, from + Vector3.up * 5.4f, 1.2f, dir, back, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore))) continue;
-                            if (!NavMesh.SamplePosition(from, out var hit, 1.5f, NavMesh.AllAreas)) continue;
-                            p.feet = hit.position; p.yaw = yaw; p.fps = LabSim.BotFps; p.maxTime = 5f;
-                            var r = LabSim.Run(ghost, p); sims++;
-                            if (!r.landed || !r.onWalkable || r.fallDamage > 0) continue;
-                            int to = world.RegionAt(r.landing);
-                            if (to < 0) continue;
-                            bool shortcut = false;
-                            if (to == region)
-                            {
-                                if (r.Rise < 1.6f && LabSim.Horizontal(r.landing - p.feet) < 12f) continue;
-                                float walk = NavMesh.CalculatePath(p.feet, r.landing, NavMesh.AllAreas, path) && path.status == NavMeshPathStatus.PathComplete ? PathLength(path) : 9999f;
-                                if (walk - LabSim.Horizontal(r.landing - p.feet) < 25f) continue;
-                                shortcut = true;
-                            }
-                            var link = new Link
-                            {
-                                move = p.move, from = p.feet, to = r.landing, yaw = yaw, runUp = p.runUp, pitch = p.pitch, fireDelay = p.fireDelay, hops = p.hops, shots = p.shots, backwards = p.backwards,
-                                time = r.time, rise = r.Rise, peak = r.maxRise, distance = LabSim.Horizontal(r.landing - p.feet), fromRegion = region, toRegion = to, shortcut = shortcut,
-                                path = r.path.Where((x, i) => i % 24 == 0 || i == r.path.Count - 1).ToArray(),
-                            };
-                            var key = (Mathf.RoundToInt(p.feet.x / 6f), Mathf.RoundToInt(p.feet.z / 6f), Mathf.RoundToInt(r.landing.x / 4f), Mathf.RoundToInt(r.landing.y / 2f), Mathf.RoundToInt(r.landing.z / 4f), region);
-                            if (!best.TryGetValue(key, out var old) || link.time < old.time) best[key] = link;
-                            if (reachable.Add(to)) queue.Enqueue(to);
+                            progress = edgesTotal > 0 ? Mathf.Min(0.95f, (float)edgesDone / edgesTotal) : 0f;
+                            state = $"ищу прыжки: участков {reachable.Count}, опытов {sims}, найдено {best.Count}";
+                            yield return null; frame.Restart();
                         }
                     }
+                }
+            }
+            // phase 2: aimed tries at what is still grey. The edge directions can miss a way in (a gap between fences, a beam end): for
+            // every unreachable region near the reachable ones, from the 6 nearest reachable spots, every move aimed straight at it.
+            int before = reachable.Count;
+            var reachTris = new List<int>(); for (int t = 0; t < world.tris.Length / 3; t++) if (reachable.Contains(world.triRegion[t])) reachTris.Add(t);
+            var greyRegions = Enumerable.Range(0, world.regionCount).Where(r => !reachable.Contains(r) && world.regionArea[r] >= 20f).ToList();
+            foreach (int u in greyRegions)
+            {
+                if (reachable.Contains(u)) continue;
+                var uTris = Enumerable.Range(0, world.tris.Length / 3).Where(t => world.triRegion[t] == u).Select(Centroid).ToList();
+                // the reachable spots nearest to the region (horizontally within 60), at least 5 apart
+                var cands = new List<(Vector3 from, Vector3 at, float d)>();
+                foreach (int t in reachTris)
+                {
+                    var c = Centroid(t); Vector3 at = uTris[0]; float bd = float.MaxValue;
+                    foreach (var q in uTris) { float d = LabSim.Horizontal(q - c); if (d < bd) { bd = d; at = q; } }
+                    if (bd < 60f) cands.Add((c, at, bd));
+                }
+                var starts = new List<(Vector3 from, Vector3 at)>();
+                foreach (var c in cands.OrderBy(x => x.d)) { if (starts.All(s0 => LabSim.Horizontal(s0.from - c.from) > 5f)) starts.Add((c.from, c.at)); if (starts.Count >= 6) break; }
+                foreach (var (from0, at) in starts)
+                {
+                    if (!NavMesh.SamplePosition(from0, out var h0, 2f, NavMesh.AllAreas)) continue;
+                    int region = world.RegionAt(h0.position); if (region < 0 || !reachable.Contains(region)) continue;
+                    var to = at - h0.position; to.y = 0f; if (to.sqrMagnitude < 0.01f) continue;
+                    float yaw0 = Quaternion.LookRotation(to).eulerAngles.y;
+                    foreach (float dy in new[] { 0f, -15f, 15f })
+                        foreach (var p in Variants(h0.position, yaw0 + dy)) { probes++; Try(p, h0.position, yaw0 + dy, region); }
                     if (frame.Elapsed.TotalMilliseconds > frameBudgetMs)
                     {
-                        progress = edgesTotal > 0 ? (float)edgesDone / edgesTotal : 0f;
-                        state = $"ищу прыжки: участков {reachable.Count}, опытов {sims}, найдено {best.Count}";
+                        state = $"добираю серые места: участков {reachable.Count}, опытов {sims}, найдено {best.Count}";
                         yield return null; frame.Restart();
                     }
                 }
             }
+            if (reachable.Count == before) break;   // nothing new: done
         }
         links.AddRange(best.Values);
         for (int i = 0; i < links.Count; i++) links[i].id = i;
         seconds = (float)sw.Elapsed.TotalSeconds; progress = 1f; done = true;
-        state = $"готово: {links.Count} прыжков, {reachable.Count} участков достижимы, {sims} опытов за {seconds:F0} с";
+        state = $"готово: {links.Count} прыжков, {reachable.Count} участков достижимы, {sims} опытов ({probes} прицельных) за {seconds:F0} с";
         Save();
+    }
+
+    /// <summary>A crossing the owner made himself (lab walk mode) from one region to another: a walk link, proven by a real player
+    /// on the real motor. Returns true when it made a grey region reachable.</summary>
+    public bool AddObserved(Vector3 from, Vector3 to, float time)
+    {
+        int ra = world.RegionAt(from, 2f), rb = world.RegionAt(to, 2f);
+        if (ra < 0 || rb < 0 || ra == rb) return false;
+        var d = to - from; d.y = 0f; if (d.sqrMagnitude < 0.01f) return false;
+        var link = new Link { move = LabSim.Move.Walk, from = from, to = to, yaw = Quaternion.LookRotation(d).eulerAngles.y, runUp = Mathf.Max(0.3f, time),
+            time = time, rise = to.y - from.y, distance = d.magnitude, fromRegion = ra, toRegion = rb, path = new[] { from, to }, observed = true, id = links.Count };
+        links.Add(link); thinned = null;
+        bool newly = reachable.Contains(ra) && reachable.Add(rb);
+        Save();
+        return newly;
     }
 
     public static float PathLength(NavMeshPath p) { float l = 0f; for (int i = 1; i < p.corners.Length; i++) l += Vector3.Distance(p.corners[i - 1], p.corners[i]); return l; }
@@ -164,7 +224,7 @@ public class LabLinks
         public float time;
         public string Describe()
         {
-            var parts = legs.Select(l => l.link == null ? $"бег {LabSim.Horizontal(l.to - l.from):F0}" : LabSim.RuName(l.link.move).ToLowerInvariant() + $" ({l.link.Params().Recipe()})");
+            var parts = legs.Select(l => l.link == null ? $"бег {LabSim.Horizontal(l.to - l.from):F0}" : LabSim.RuName(l.link.move).ToLowerInvariant() + $" ({l.link.Params().Recipe()})" + (l.link.fallDamage > 0 ? $" [−{l.link.fallDamage} HP от падения]" : ""));
             return $"≈{time:F1} с: " + string.Join(" → ", parts);
         }
     }
@@ -177,16 +237,33 @@ public class LabLinks
     /// <summary>A cheap walking estimate inside one region (straight line × 1.3); the played route walks the real NavMesh path.</summary>
     static float WalkEstimate(Vector3 a, Vector3 b) => Vector3.Distance(a, b) * 1.3f / RunSpeed;
 
+    /// <summary>What a move costs on top of its time when choosing a route: plain running first, a jump only when it is needed or
+    /// clearly quicker, rockets last (they cost health and a weapon switch). Seconds.</summary>
+    public static float Penalty(LabSim.Move m)
+    {
+        switch (m)
+        {
+            case LabSim.Move.Walk: return 0f;
+            case LabSim.Move.Jump: return 0.3f; case LabSim.Move.RunJump: return 0.5f; case LabSim.Move.Bunnyhop: return 0.8f; case LabSim.Move.Bat: return 0.8f;
+            // rockets: only when nothing else gets there (the owner's rule: self-damage; the spawn-invulnerability boost is a bot rule)
+            case LabSim.Move.Shotgun: return 1.5f; case LabSim.Move.Rocket: return 30f; default: return 35f;
+        }
+    }
+
+    /// <summary>Penalty of the move plus the fall damage: 40 HP ≈ 6 s, 80 HP ≈ 12 s of detour.</summary>
+    public static float Cost(Link l) => Penalty(l.move) + l.fallDamage * 0.15f;
+
+    int thinnedMask = -1;
     Dictionary<int, List<Link>> thinned;
     /// <summary>Per start region: for every region it leads to, the quickest link and then up to 7 more spread over the start region
     /// (each the farthest from those already taken), so routes can start a jump near wherever the bot is.</summary>
-    Dictionary<int, List<Link>> Thinned()
+    Dictionary<int, List<Link>> Thinned(int mask)
     {
-        if (thinned != null) return thinned;
-        thinned = new Dictionary<int, List<Link>>();
-        foreach (var g in links.GroupBy(l => (l.fromRegion, l.toRegion)))
+        if (thinned != null && thinnedMask == mask) return thinned;
+        thinned = new Dictionary<int, List<Link>>(); thinnedMask = mask;
+        foreach (var g in links.Where(l => (mask & (1 << (int)l.move)) != 0).GroupBy(l => (l.fromRegion, l.toRegion)))
         {
-            var all = g.OrderBy(l => l.time).ToList(); var pick = new List<Link> { all[0] };
+            var all = g.OrderBy(l => l.time + Cost(l)).ToList(); var pick = new List<Link> { all[0] };
             while (pick.Count < 8 && pick.Count < all.Count)
             {
                 var far = all.Where(l => !pick.Contains(l)).OrderByDescending(l => pick.Min(q => (q.from - l.from).sqrMagnitude)).First();
@@ -199,12 +276,12 @@ public class LabLinks
     }
 
     /// <summary>The quickest way from a to b with walking and the found links; null if there is none.</summary>
-    public Route FindRoute(Vector3 a, Vector3 b)
+    public Route FindRoute(Vector3 a, Vector3 b, int mask = ~0)
     {
         int ra = world.RegionAt(a, 3f), rb = world.RegionAt(b, 3f);
         if (ra < 0 || rb < 0) return null;
-        var byRegion = Thinned();
-        var nearA = links.Where(l => l.fromRegion == ra && LabSim.Horizontal(l.from - a) < 25f).ToList();   // all jumps right next to the start
+        var byRegion = Thinned(mask);
+        var nearA = links.Where(l => l.fromRegion == ra && (mask & (1 << (int)l.move)) != 0 && LabSim.Horizontal(l.from - a) < 25f).ToList();   // all allowed jumps right next to the start
         var path = new NavMeshPath();
         // states: -1 = a, i = landing of links[i]
         var dist = new Dictionary<int, float> { [-1] = 0f }; var prev = new Dictionary<int, int>(); var done = new HashSet<int>();
@@ -222,7 +299,7 @@ public class LabLinks
             foreach (var l in outs)
             {
                 int i = l.id; if (done.Contains(i)) continue;
-                float nd = d + WalkEstimate(pos, l.from) + l.time;
+                float nd = d + WalkEstimate(pos, l.from) + l.time + Cost(l);
                 if (float.IsInfinity(nd)) continue;
                 if (!dist.TryGetValue(i, out float od) || nd < od) { dist[i] = nd; prev[i] = s; open.Add(i); }
             }
@@ -258,7 +335,7 @@ public class LabLinks
                 all.events.Add(new LabSim.Event { t = all.path.Count * all.dt, what = LabSim.RuName(p.move) + ": " + p.Recipe(), at = p.feet });
                 if (r.landed) LabSim.Place(ghost, r.landing, ghost.transform.eulerAngles.y);
             }
-            all.path.AddRange(r.path); all.views.AddRange(r.views); all.air.AddRange(r.air);
+            all.path.AddRange(r.path); all.views.AddRange(r.views); all.air.AddRange(r.air); all.weapons.AddRange(r.weapons);
         }
         all.landing = all.path.Count > 0 ? all.path[all.path.Count - 1] : a;
         all.time = all.path.Count * all.dt;
