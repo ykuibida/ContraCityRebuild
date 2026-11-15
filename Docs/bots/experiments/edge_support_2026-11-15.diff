@@ -1,0 +1,179 @@
+diff --git a/Assets/Game/Scripts/Lab/LabController.cs b/Assets/Game/Scripts/Lab/LabController.cs
+index fffa888a..69d463a3 100644
+--- a/Assets/Game/Scripts/Lab/LabController.cs
++++ b/Assets/Game/Scripts/Lab/LabController.cs
+@@ -679,7 +679,7 @@ public class LabController : MonoBehaviour
+ 
+     IEnumerator AutoTest()
+     {
+-        Log($"=== {map}: walk grid {world.cellCount} cells of {LabWorld.Cell}×{LabWorld.Cell} ({world.columns} columns), {world.regionCount} regions, built in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
++        Log($"=== {map}: walk grid {world.cellCount} cells of {LabWorld.Cell}×{LabWorld.Cell} ({world.columns} columns, {world.edgeSupported} by edge support), {world.regionCount} regions, built in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
+         float reachArea = links.reachable.Sum(r => world.regionArea[r]);
+         Log($"{map}: reachable from the spawns {links.reachable.Count} regions, {reachArea:F0} sq units ({100f * reachArea / Mathf.Max(1f, world.navArea):F0}% of the surface); spawns on the surface {world.markers.Count(m => LabWorld.IsSpawn(m.kind) && m.region >= 0)}/{world.markers.Count(m => LabWorld.IsSpawn(m.kind))}");
+         Log($"{map}: search {links.state}; base gate colliders opened {gatesOpened}, automatic doors opened {doorsOpened}");
+@@ -703,7 +703,7 @@ public class LabController : MonoBehaviour
+             if (Directory.Exists(walkDir))
+                 foreach (var f in Directory.GetFiles(walkDir, map + "_*.csv"))
+                 {
+-                    int steps = 0, onGrid = 0, reach = 0;
++                    int steps = 0, onGrid = 0, reach = 0; var offGrid = new List<Vector3>();
+                     foreach (var line in File.ReadAllLines(f).Skip(2))
+                     {
+                         var m = System.Text.RegularExpressions.Regex.Match(line, @"^(-?\d+[.,]\d\d),(-?\d+[.,]\d\d),(-?\d+[.,]\d\d),(-?\d+[.,]\d\d),(\d),");
+@@ -711,7 +711,9 @@ public class LabController : MonoBehaviour
+                         float F(int g) => float.Parse(m.Groups[g].Value.Replace(',', '.'), System.Globalization.CultureInfo.InvariantCulture);
+                         var pt = new Vector3(F(2), F(3), F(4)); steps++;
+                         int rr = world.RegionAt(pt, 2f); if (rr >= 0) { onGrid++; if (links.reachable.Contains(rr)) reach++; }
++                        else if (offGrid.Count < 10 && offGrid.All(q => Vector3.Distance(q, pt) > 4f)) offGrid.Add(pt);
+                     }
++                    foreach (var q in offGrid) Log($"{map}: owner stood off the grid at {q}:{world.WhyApart(q + Vector3.left * 1.5f, q + Vector3.right * 1.5f)}{world.WhyApart(q + Vector3.back * 1.5f, q + Vector3.forward * 1.5f)}");
+                     Log($"{map}: owner's walk {Path.GetFileName(f)}: {steps} grounded steps, on the walk grid {onGrid} ({100f * onGrid / Mathf.Max(1, steps):F0}%), reachable {reach} ({100f * reach / Mathf.Max(1, steps):F0}%)");
+                 }
+         }
+@@ -722,6 +724,10 @@ public class LabController : MonoBehaviour
+         cam.orthographicSize = Mathf.Max(b.extents.x / cam.aspect, b.extents.z) * 0.8f;
+         cam.transform.SetPositionAndRotation(new Vector3(b.center.x, world.navMaxY + 60f, b.center.z), Quaternion.Euler(90f, 0f, 0f));
+         yield return Shot($"lab_{map}_links");
++        // the same from above without the links: the reachable cells found only by the ball (edge support) red
++        showLinks = false; linksObj.SetActive(false); LabWorld.ShowBall = true; world.BuildMesh(links.reachable);
++        yield return Shot($"lab_{map}_ball");
++        LabWorld.ShowBall = false; world.BuildMesh(links.reachable); showLinks = true; linksObj.SetActive(true);
+         showLinks = false; linksObj.SetActive(false); cam.orthographic = false;
+ 
+         // routes from a spawn to the places the search found hardest to reach: the highest landings of different regions
+diff --git a/Assets/Game/Scripts/Lab/LabLinks.cs b/Assets/Game/Scripts/Lab/LabLinks.cs
+index 14640703..ae8aa7a9 100644
+--- a/Assets/Game/Scripts/Lab/LabLinks.cs
++++ b/Assets/Game/Scripts/Lab/LabLinks.cs
+@@ -20,7 +20,7 @@ using UnityEngine.AI;
+ 
+ public class LabLinks
+ {
+-    public const int Version = 8;   // 7: the walk grid instead of the NavMesh; 8: floors under floors of one collider, doors out, landings that hold 0.3 s   // bump when the search or LabSim changes: cached files of another version are ignored
++    public const int Version = 10;   // 7: the walk grid instead of the NavMesh; 8: floors under floors of one collider, doors out, landings that hold 0.3 s; 9: edge support (ledges, beams, sills); 10: shortcuts that are ≥ 1 s quicker than running   // bump when the search or LabSim changes: cached files of another version are ignored
+ 
+     [System.Serializable]
+     public class Link
+@@ -162,7 +162,10 @@ public class LabLinks
+             {
+                 if (r.Rise < 1.6f && LabSim.Horizontal(r.landing - p.feet) < 12f) return -1;
+                 float walk = world.WalkDistance(p.feet, r.landing); if (float.IsInfinity(walk)) walk = 9999f;
+-                if (walk - LabSim.Horizontal(r.landing - p.feet) < 25f) return -1;
++                // a shortcut: walking there is a detour (≥ 25 longer), or the move is clearly quicker than running there (≥ 1 s): the
++                // shotgun along Форпост's long bridge — once the edge support joined the base platform and the bridge into one region,
++                // the detour rule alone dropped it and the route got 2 s slower
++                if (walk - LabSim.Horizontal(r.landing - p.feet) < 25f && walk / RunSpeed - r.time < 1f) return -1;
+                 shortcut = true;
+             }
+             var link = new Link
+diff --git a/Assets/Game/Scripts/Lab/LabWorld.cs b/Assets/Game/Scripts/Lab/LabWorld.cs
+index db5cb476..7cf81bd4 100644
+--- a/Assets/Game/Scripts/Lab/LabWorld.cs
++++ b/Assets/Game/Scripts/Lab/LabWorld.cs
+@@ -31,12 +31,17 @@ public class LabWorld
+     // the grid
+     public const float Cell = 1f;
+     const float StandRadius = 1.15f, Skin = 0.45f, Height = 6.5f, Step = 1.5f;
++    /// <summary>Edge support: the lowest contact normal (y) of the fighter's ball on a ledge that still holds him (0.3: the contact up
++    /// to ~1.1 off the column centre; the motor has slope limit 90, it does not slide off an edge it stands on).</summary>
++    const float SupportNy = 0.3f;
++    public int edgeSupported;   // cells found only by the ball (diagnostics)
+     float x0, z0; int nx, nz;
+     int[] colStart, colLen;                 // per column: its cells [colStart, colStart + colLen) in the arrays below
+     public Vector3[] cells;                 // feet position on the floor
+     float[] cellNy;                         // floor normal's y (slope)
+     public int[] cellRegion;
+-    bool[] cellEdge;                        // a cell with a missing neighbour (a drop or a wall next to it)
++    bool[] cellEdge;                        // a cell with a missing neighbour (a drop or a wall next to it), or held by an edge
++    bool[] cellBall;                        // found only by the ball (edge support): the fringe of a floor over its drop, or a thin ledge
+     public int regionCount; public float[] regionArea;
+     public struct Edge { public Vector3 a, b, outward; public int region; }
+     public readonly List<Edge> boundary = new List<Edge>();
+@@ -169,7 +174,7 @@ public class LabWorld
+         columns = nx * nz;
+         colStart = new int[columns]; colLen = new int[columns];
+         var pos = new List<Vector3>(columns); var ny = new List<float>(columns);
+-        var hits = new RaycastHit[64]; var floors = new List<RaycastHit>(16);
++        var hits = new RaycastHit[64]; var floors = new List<RaycastHit>(16); edgeSupported = 0; var ball = new List<bool>(columns);
+         for (int iz = 0; iz < nz; iz++)
+             for (int ix = 0; ix < nx; ix++)
+             {
+@@ -188,12 +193,35 @@ public class LabWorld
+                     // the fighter's capsule standing here (its bottom Skin above the floor)
+                     var a = p + Vector3.up * (Skin + StandRadius + 0.05f); var b = p + Vector3.up * (Skin + Height - StandRadius);
+                     if (Physics.CheckCapsule(a, b, StandRadius, Mask, QueryTriggerInteraction.Ignore)) continue;
+-                    pos.Add(p); ny.Add(h.normal.y);
++                    pos.Add(p); ny.Add(h.normal.y); ball.Add(false);
++                }
++                // edge support: the fighter's round bottom rests on a ledge, a beam, a sill or a pipe the ray at the column centre misses
++                // (thinner than a cell, or its edge under a fighter who stands over the drop). A ball of the fighter's radius is let
++                // down the column; where it sits on something, the fighter stands there (the owner, 15.11.2026, Ангар, задний двор:
++                // along the beam at −45 by the wall, on the window sill, on the beam ends — all off the grid before)
++                float sy = top;
++                for (int guard = 0; guard < 24 && sy > top - depth; guard++)
++                {
++                    if (!Physics.SphereCast(new Vector3(x, sy, z), StandRadius, Vector3.down, out var h, sy - (top - depth), Mask, QueryTriggerInteraction.Ignore)) break;
++                    float centre = sy - h.distance, stand = centre - StandRadius;
++                    sy = h.point.y - 0.05f - StandRadius;   // the next ball starts just under this contact
++                    if (h.normal.y < SupportNy) continue;     // a contact on the ball's side: a wall, not a support
++                    bool have = false;
++                    for (int i = colStart[col]; i < pos.Count; i++) if (Mathf.Abs(pos[i].y - stand) < 0.6f) { have = true; break; }
++                    if (have) continue;
++                    var p = new Vector3(x, stand, z);
++                    var a = p + Vector3.up * (Skin + StandRadius + 0.05f); var b = p + Vector3.up * (Skin + Height - StandRadius);
++                    if (Physics.CheckCapsule(a, b, StandRadius, Mask, QueryTriggerInteraction.Ignore)) continue;
++                    // keep the column's cells top first
++                    int at = colStart[col]; while (at < pos.Count && pos[at].y > stand) at++;
++                    // flat for the step rule: the contact normal is the edge's, not a slope (with it the step rule let the fighter
++                    // "walk" 3.5 up from such a cell)
++                    pos.Insert(at, p); ny.Insert(at, 1f); ball.Insert(at, true); edgeSupported++;
+                 }
+                 colLen[col] = pos.Count - colStart[col];
+             }
+         foreach (var g in global) g.enabled = true;
+-        cells = pos.ToArray(); cellNy = ny.ToArray(); cellCount = cells.Length;
++        cells = pos.ToArray(); cellNy = ny.ToArray(); cellBall = ball.ToArray(); cellCount = cells.Length;
+         cellEdge = new bool[cellCount];
+ 
+         // regions: union-find over walk-connected neighbours
+@@ -208,15 +236,19 @@ public class LabWorld
+         for (int c = 0; c < cellCount; c++) { regionArea[cellRegion[c]] += Cell * Cell; navMinY = Mathf.Min(navMinY, cells[c].y); navMaxY = Mathf.Max(navMaxY, cells[c].y); }
+         navArea = cellCount * Cell * Cell;
+ 
+-        for (int c = 0; c < cellCount; c++) for (int k = 0; k < 8; k++) if (Neighbour(c, k) < 0) { cellEdge[c] = true; break; }
++        // a "missing" neighbour for the edges: none, or (from a real floor) a ball cell — the fringe over the drop
++        bool Missing(int c, int k) { int d = Neighbour(c, k); return d < 0 || (!cellBall[c] && cellBall[d]); }
++        var fringe = new bool[cellCount];
++        for (int c = 0; c < cellCount; c++) if (cellBall[c]) for (int k = 0; k < 8; k++) { int d = Neighbour(c, k); if (d >= 0 && !cellBall[d]) { fringe[c] = true; break; } }
++        for (int c = 0; c < cellCount; c++) { if (cellBall[c]) { cellEdge[c] = true; continue; } for (int k = 0; k < 8; k++) if (Missing(c, k)) { cellEdge[c] = true; break; } }
+         // edges: cells with a missing neighbour; outward = the mean direction of the missing ones; every other edge cell (≈ 2 units)
+         boundary.Clear();
+         for (int c = 0; c < cellCount; c++)
+         {
+             ColumnOf(c, out int ix, out int iz);
+-            if (((ix + iz) & 1) != 0) continue;
++            if (((ix + iz) & 1) != 0 || fringe[c]) continue;
+             var outward = Vector3.zero; int missing = 0;
+-            for (int k = 0; k < 8; k++) if (Neighbour(c, k) < 0) { outward += new Vector3(DX[k], 0f, DZ[k]).normalized; missing++; }
++            for (int k = 0; k < 8; k++) if (Missing(c, k)) { outward += new Vector3(DX[k], 0f, DZ[k]).normalized; missing++; }
+             if (missing == 0 || outward.sqrMagnitude < 0.01f) continue;
+             outward.Normalize();
+             boundary.Add(new Edge { a = cells[c] + outward * 1.3f, b = cells[c] + outward * 1.3f, outward = outward, region = cellRegion[c] });
+@@ -402,6 +434,8 @@ public class LabWorld
+     }
+ 
+     /// <summary>The cells for drawing: reachable regions coloured by height (cyan → green → yellow → magenta), the rest grey.</summary>
++    /// <summary>Diagnostics picture: the reachable cells found only by the ball (edge support) drawn red.</summary>
++    public static bool ShowBall;
+     public void BuildMesh(HashSet<int> reachable)
+     {
+         if (navMesh == null) navMesh = new Mesh { indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
+@@ -430,7 +464,7 @@ public class LabWorld
+             int c = draw[q];
+             var p = cells[c] + Vector3.up * 0.2f;
+             bool ok = reachable == null || reachable.Contains(cellRegion[c]);
+-            var cc = ok ? Height(cells[c].y) : new Color(0.25f, 0.25f, 0.25f, 0.35f);
++            var cc = ok ? (ShowBall && cellBall[c] ? Color.red : Height(cells[c].y)) : new Color(0.25f, 0.25f, 0.25f, 0.35f);
+             v[q * 4] = p + new Vector3(-h, 0, -h); v[q * 4 + 1] = p + new Vector3(-h, 0, h); v[q * 4 + 2] = p + new Vector3(h, 0, h); v[q * 4 + 3] = p + new Vector3(h, 0, -h);
+             for (int k = 0; k < 4; k++) col[q * 4 + k] = cc;
+             idx[q * 6] = q * 4; idx[q * 6 + 1] = q * 4 + 1; idx[q * 6 + 2] = q * 4 + 2; idx[q * 6 + 3] = q * 4; idx[q * 6 + 4] = q * 4 + 2; idx[q * 6 + 5] = q * 4 + 3;

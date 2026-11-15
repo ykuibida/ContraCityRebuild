@@ -1,0 +1,91 @@
+# Arena_3lvl: the owner's jumps (19), damage taken 0
+Walk (9.60, -56.90, 332.41) -> (9.61, -64.85, 330.73) air 0,44 s, shotgun 0, rockets 0, hops 1, bat True, run 0,0: отрыв не на сетке
+RunJump (28.70, -64.85, 326.89) -> (39.71, -64.85, 318.89) air 1,00 s, shotgun 0, rockets 0, hops 1, bat False, run 16,1: бот умеет: ≈0,9 с: бег 14
+Bat (24.05, -64.85, 316.80) -> (9.31, -64.85, 320.25) air 0,99 s, shotgun 0, rockets 0, hops 1, bat True, run 20,2: бот умеет: ≈1,0 с: бег 15
+Bat (8.87, -64.85, 320.49) -> (1.52, -57.27, 327.18) air 1,37 s, shotgun 0, rockets 0, hops 2, bat True, run 10,3: бот умеет: ≈2,2 с: бег 6 → распрыжка (разбег 0,6 с, распрыжка, 2 прыжка) → бег 4
+Bat (1.22, -57.27, 329.16) -> (7.32, -53.81, 331.32) air 0,73 s, shotgun 0, rockets 0, hops 1, bat True, run 13,3: приземление не на сетке
+Shotgun (8.60, -53.83, 331.31) -> (-36.03, -64.85, 333.23) air 3,25 s, shotgun 1, rockets 0, hops 3, bat True, run 6,8: отрыв не на сетке
+Shotgun (-25.33, -64.85, 329.02) -> (-23.73, -54.47, 331.11) air 2,74 s, shotgun 2, rockets 0, hops 2, bat False, run 12,5: приземление не на сетке
+Shotgun (-23.77, -54.50, 331.11) -> (-36.93, -64.85, 329.59) air 1,10 s, shotgun 1, rockets 0, hops 1, bat False, run 2,8: отрыв не на сетке
+Shotgun (-25.29, -64.85, 329.40) -> (-32.08, -64.85, 333.09) air 1,32 s, shotgun 1, rockets 0, hops 1, bat False, run 5,7: бот умеет: ≈0,5 с: бег 8
+Shotgun (-23.89, -64.85, 329.51) -> (-24.81, -54.20, 331.15) air 2,19 s, shotgun 2, rockets 0, hops 2, bat False, run 12,8: приземление не на сетке
+Shotgun (-24.84, -54.20, 331.15) -> (-37.64, -45.06, 326.34) air 1,02 s, shotgun 1, rockets 0, hops 1, bat False, run 2,2: отрыв не на сетке
+RunJump (-37.68, -45.00, 301.63) -> (-36.61, -46.20, 291.17) air 1,08 s, shotgun 0, rockets 0, hops 1, bat False, run 16,1: отрыв не на сетке
+Shotgun (-37.33, -45.15, 296.04) -> (-37.57, -39.00, 294.59) air 0,60 s, shotgun 1, rockets 0, hops 2, bat False, run 1,1: отрыв не на сетке
+Walk (-42.23, -39.46, 285.05) -> (-45.36, -41.25, 285.45) air 0,34 s, shotgun 0, rockets 0, hops 1, bat False, run 11,9: бот умеет: ≈0,2 с: бег 3
+RunJump (-44.36, -41.25, 284.33) -> (-40.06, -38.48, 279.71) air 0,79 s, shotgun 0, rockets 0, hops 1, bat False, run 13,7: бот умеет: ≈1,9 с: бег 5 → бег / сход с края (просто бег вперёд 1,2 с (на соседний кусок пола или вниз с края)) → бег 11
+Walk (-42.22, -39.45, 277.58) -> (-45.65, -41.25, 274.07) air 0,32 s, shotgun 0, rockets 0, hops 1, bat False, run 12,2: бот умеет: ≈0,3 с: бег 5
+Shotgun (-53.46, -41.25, 273.52) -> (-52.49, -38.64, 295.13) air 0,83 s, shotgun 1, rockets 0, hops 1, bat False, run 14,1: бот умеет: ≈1,4 с: бег 22
+Shotgun (-55.06, -37.26, 305.14) -> (-64.99, -32.02, 305.61) air 0,77 s, shotgun 1, rockets 0, hops 1, bat False, run 15,3: бот умеет: ≈0,6 с: бег 10
+Bunnyhop (-82.98, -23.07, 297.93) -> (-68.82, -11.41, 287.11) air 3,43 s, shotgun 0, rockets 0, hops 5, bat False, run 14,2: бот умеет: ≈2,4 с: бег 18
+# grounded where the grid has no cell (what the grid saw there)
+(9.60, -56.90, 332.41):
+    (8,5, 332,5): cells (ray from -32,9: 2 hits at -53,3'wood_06_b11' -64,9'concrete_0202') | rejected floor -53,28 on 'wood_06_b11' ny 1,00: capsule touches 'wood_06_b11'<Arena_3lvl(the floor itself)
+    (9,5, 332,5): cells (ray from -32,9: 2 hits at -53,3'wood_06_b11' -64,9'concrete_0202') | rejected floor -53,28 on 'wood_06_b11' ny 1,00: capsule touches 'wood_06_b11'<Arena_3lvl(the floor itself)
+    (10,5, 332,5): cells (ray from -32,9: 1 hits at -64,9'concrete_0202')
+    (11,5, 332,5): cells -64,90[r11] (ray from -32,9: 1 hits at -64,9'concrete_0202')
+(7.13, -53.81, 331.32):
+    (5,5, 331,5): cells (ray from -29,8: 2 hits at -61,2'concrete_0409' -64,9'concrete_0202')
+    (6,5, 331,5): cells (ray from -29,8: 1 hits at -64,9'concrete_0202')
+    (7,5, 331,5): cells (ray from -29,8: 1 hits at -64,9'concrete_0202')
+    (8,5, 331,5): cells (ray from -29,8: 1 hits at -64,9'concrete_0202')
+(-23.75, -54.47, 331.11):
+    (-25,5, 331,5): cells (ray from -30,5: 1 hits at -64,9'concrete_0202')
+    (-24,5, 331,5): cells (ray from -30,5: 1 hits at -64,9'concrete_0202')
+    (-23,5, 331,5): cells (ray from -30,5: 1 hits at -64,9'concrete_0202')
+    (-22,5, 331,5): cells (ray from -30,5: 1 hits at -64,9'concrete_0202')
+(-37.32, -45.23, 330.09):
+    (-38,5, 330,5): cells (ray from -21,2: 1 hits at -45,1'wood_06_b34') | rejected floor -45,05 on 'wood_06_b34' ny 1,00: capsule touches 'wood_0400'<Arena_3lvl
+    (-37,5, 330,5): cells (ray from -21,2: 0 hits at )
+    (-36,5, 330,5): cells (ray from -21,2: 0 hits at )
+    (-35,5, 330,5): cells (ray from -21,2: 0 hits at )
+(-37.64, -45.06, 326.10):
+    (-39,5, 326,5): cells (ray from -21,1: 0 hits at )
+    (-38,5, 326,5): cells (ray from -21,1: 1 hits at -45,0'wood_06_b34') | rejected floor -45,04 on 'wood_06_b34' ny 1,00: capsule touches 'wood_0400'<Arena_3lvl
+    (-37,5, 326,5): cells (ray from -21,1: 0 hits at )
+    (-36,5, 326,5): cells (ray from -21,1: 0 hits at )
+(-37.67, -45.04, 322.81):
+    (-39,5, 322,5): cells (ray from -21,0: 0 hits at )
+    (-38,5, 322,5): cells (ray from -21,0: 1 hits at -45,0'wood_06_b34') | rejected floor -45,03 on 'wood_06_b34' ny 1,00: capsule touches 'wood_0400'<Arena_3lvl
+    (-37,5, 322,5): cells (ray from -21,0: 0 hits at )
+    (-36,5, 322,5): cells (ray from -21,0: 0 hits at )
+(-37.68, -45.03, 319.42):
+    (-39,5, 319,5): cells (ray from -21,0: 0 hits at )
+    (-38,5, 319,5): cells (ray from -21,0: 1 hits at -45,0'wood_06_b34') | rejected floor -45,03 on 'wood_06_b34' ny 1,00: capsule touches 'wood_0400'<Arena_3lvl
+    (-37,5, 319,5): cells (ray from -21,0: 0 hits at )
+    (-36,5, 319,5): cells (ray from -21,0: 0 hits at )
+(-37.68, -45.03, 316.14):
+    (-39,5, 316,5): cells (ray from -21,0: 0 hits at )
+    (-38,5, 316,5): cells (ray from -21,0: 1 hits at -45,0'wood_06_b34') | rejected floor -45,02 on 'wood_06_b34' ny 1,00: capsule touches 'wood_0400'<Arena_3lvl
+    (-37,5, 316,5): cells (ray from -21,0: 0 hits at )
+    (-36,5, 316,5): cells (ray from -21,0: 0 hits at )
+(-37.68, -45.02, 312.88):
+    (-39,5, 312,5): cells (ray from -21,0: 0 hits at )
+    (-38,5, 312,5): cells (ray from -21,0: 1 hits at -45,0'wood_06_b34') | rejected floor -45,01 on 'wood_06_b34' ny 1,00: capsule touches 'wood_0400'<Arena_3lvl
+    (-37,5, 312,5): cells (ray from -21,0: 0 hits at )
+    (-36,5, 312,5): cells (ray from -21,0: 0 hits at )
+(-37.68, -45.01, 309.75):
+    (-39,5, 309,5): cells (ray from -21,0: 0 hits at )
+    (-38,5, 309,5): cells (ray from -21,0: 1 hits at -45,0'wood_06_b34') | rejected floor -45,01 on 'wood_06_b34' ny 1,00: capsule touches 'wood_0400'<Arena_3lvl
+    (-37,5, 309,5): cells (ray from -21,0: 0 hits at )
+    (-36,5, 309,5): cells (ray from -21,0: 0 hits at )
+(-37.68, -45.01, 306.28):
+    (-39,5, 306,5): cells (ray from -21,0: 0 hits at )
+    (-38,5, 306,5): cells (ray from -21,0: 1 hits at -45,0'wood_06_b34') | rejected floor -45,00 on 'wood_06_b34' ny 1,00: capsule touches 'wood_0400'<Arena_3lvl
+    (-37,5, 306,5): cells (ray from -21,0: 0 hits at )
+    (-36,5, 306,5): cells (ray from -21,0: 0 hits at )
+(-37.68, -45.00, 303.05):
+    (-39,5, 303,5): cells (ray from -21,0: 0 hits at )
+    (-38,5, 303,5): cells (ray from -21,0: 1 hits at -45,0'wood_06_b34') | rejected floor -44,99 on 'wood_06_b34' ny 1,00: capsule touches 'wood_0400'<Arena_3lvl
+    (-37,5, 303,5): cells (ray from -21,0: 0 hits at )
+    (-36,5, 303,5): cells (ray from -21,0: 0 hits at )
+(-37.37, -45.13, 295.05):
+    (-38,5, 295,5): cells (ray from -21,1: 1 hits at -45,0'wood_06_b34') | rejected floor -44,98 on 'wood_06_b34' ny 1,00: capsule touches 'wood_0400'<Arena_3lvl
+    (-37,5, 295,5): cells (ray from -21,1: 0 hits at )
+    (-36,5, 295,5): cells (ray from -21,1: 0 hits at )
+    (-35,5, 295,5): cells (ray from -21,1: 0 hits at )
+(-37.57, -39.00, 294.59):
+    (-39,5, 294,5): cells (ray from -15,0: 1 hits at -52,2'steel_0602')
+    (-38,5, 294,5): cells (ray from -15,0: 1 hits at -45,0'wood_06_b34')
+    (-37,5, 294,5): cells (ray from -15,0: 0 hits at )
+    (-36,5, 294,5): cells (ray from -15,0: 0 hits at )

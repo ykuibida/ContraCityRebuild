@@ -219,3 +219,37 @@ The autotest now explains the biggest grey regions by itself (`-labtest`). For e
 | Монетный двор | 0 | 19.3 s | 13.6 s |
 
 The bot walked all 12 routes to the target.
+
+## Lesson: edge support with a ball (15.11.2026, tried and rolled back)
+
+**The owner's walk.** On Ангар, задний двор the owner climbed with the shotgun and the bat over the beam ends to the window sill, then along the beam at y −45 by the wall (walk `Docs/bots/lab_walks/Arena_3lvl_20261115_151033.*`). Of his 311 grounded steps the grid had 213 (68%).
+
+**Why those places are off the grid.** The grid finds floors with a ray from the centre of each 1×1 column, and a fighter standing there with a capsule of radius 1.15 centred on that column.
+- **Window sill and beam ends:** thinner than a cell. The ray at the column centre misses them (the log shows only the ground at −64.9 there).
+- **Beam at −45 by the wall** (`wood_06_b34` against `wood_0400`): the ray hits the beam in the column next to the wall, but there the capsule touches the wall. In the next column the ray finds nothing.
+- **How the real fighter stands there:** his round bottom rests on the edge, with his centre over the drop.
+
+**What was tried** (the diff: `Docs/bots/experiments/edge_support_2026-11-15.diff`):
+- a ball of radius 1.15 let down every column; where it sits on something, a cell;
+- the ball's cells flat for the step rule;
+- jump spots not taken from the ball's fringe around normal floors;
+- a same-region jump counts if it is ≥ 1 s quicker than running.
+
+**What it did:**
+
+| | Checkpoint | Ball | Ball + "≥ 1 s quicker" |
+|---|---|---|---|
+| Форпост routes | 9.3 / 10.3 / 10.1 s | 11.2 / 12.6 / 11.9 s | 9.3 / 10.6 / 10.0 s |
+| Форпост links | 17 264 | 18 377 | 20 562 |
+| Форпост reachable | 39 981 | 45 180 | 45 180 |
+| Ангар: the owner's steps on the grid | 68% | 68% | 68% |
+
+**Why it was rolled back:**
+- **The ball laid a fringe over the drop around every floor, bridge and platform** (picture: red ring around all floors). That fringe merged regions on Форпост: the base platform and the long bridge became one region. The search does not take a jump inside one region unless walking there is a 25-unit detour, so the quick shotgun jump along the bridge was lost and the routes got 2 s slower.
+- **The "≥ 1 s quicker" rule brought the times back** but added ~2 200 jumps inside one floor ("jump where you can run"). Форпост's links were all wanted and logical; these are not.
+- **On Ангар the ball still missed the beam by the wall and the sill:** the same places stayed off the grid. Not found why.
+
+**Rules from this:**
+- **Форпост is the reference.** A change to the grid or the search must leave Форпост's links and routes as they are, or the change is wrong.
+- **Edge support around normal floors is not wanted.** If ledges are added, only where no normal floor is next to them (beams, sills, beam ends).
+- **Beams and ledges where players really climb are on Ангар, задний двор only** (as far as the owner knows). It needs its own solution, to be thought out; why the ball missed the beam by the wall has to be found first.
