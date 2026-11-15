@@ -603,7 +603,10 @@ public class LabController : MonoBehaviour
         int n = 0;
         foreach (var t in targets)
         {
-            ClearRoute(); startPt = spawn.position; targetPt = t.to; DrawFlags(); MakeRoute();
+            ClearRoute(); startPt = spawn.position; targetPt = t.to; DrawFlags();
+            var rsw = System.Diagnostics.Stopwatch.StartNew(); var probe = links.FindRoute(startPt.Value, targetPt.Value, allowedMask); float routeMs = (float)rsw.Elapsed.TotalMilliseconds;
+            MakeRoute();
+            Log($"{map}: route {n} search {routeMs:F0} ms");
             bool reached = played != null && LabSim.Horizontal(played.landing - t.to) < 3f && Mathf.Abs(played.landing.y - t.to.y) < 3f;
             Log($"{map}: route {n} from {spawn.kind} {spawn.position} to {t.to} (region {t.toRegion}, +{t.to.y - spawn.position.y:F1}): {(route == null ? "none: " + routeText : $"{route.legs.Count} legs, {route.legs.Count(l => l.link != null)} jumps, reached {reached}, {routeText}")}");
             if (played != null) foreach (var e in played.events.Where(e => e.what.StartsWith("MISS"))) Log($"{map}: route {n} {e.what}");

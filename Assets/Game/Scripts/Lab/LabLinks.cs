@@ -233,9 +233,6 @@ public class LabLinks
     const float RunSpeed = 16.12f;
 
 
-    /// <summary>A cheap walking estimate inside one region (straight line × 1.3); the played route walks the real NavMesh path.</summary>
-    static float WalkEstimate(Vector3 a, Vector3 b) => Vector3.Distance(a, b) * 1.3f / RunSpeed;
-
     /// <summary>What a move costs on top of its time when choosing a route: plain running first, a jump only when it is needed or
     /// clearly quicker, rockets last (they cost health and a weapon switch). Seconds.</summary>
     public static float Penalty(LabSim.Move m)
@@ -252,68 +249,69 @@ public class LabLinks
     /// <summary>Penalty of the move plus the fall damage: 40 HP ≈ 6 s, 80 HP ≈ 12 s of detour.</summary>
     public static float Cost(Link l) => Penalty(l.move) + l.fallDamage * 0.15f;
 
-    int thinnedMask = -1;
+    /// <summary>The links by the grid cell they start from (rebuilt when the links change).</summary>
     Dictionary<int, List<Link>> thinned;
-    /// <summary>Per start region: for every region it leads to, the quickest link and then up to 7 more spread over the start region
-    /// (each the farthest from those already taken), so routes can start a jump near wherever the bot is.</summary>
-    Dictionary<int, List<Link>> Thinned(int mask)
+    Dictionary<int, List<Link>> ByCell()
     {
-        if (thinned != null && thinnedMask == mask) return thinned;
-        thinned = new Dictionary<int, List<Link>>(); thinnedMask = mask;
-        foreach (var g in links.Where(l => (mask & (1 << (int)l.move)) != 0).GroupBy(l => (l.fromRegion, l.toRegion)))
+        if (thinned != null) return thinned;
+        thinned = new Dictionary<int, List<Link>>();
+        foreach (var l in links)
         {
-            var all = g.OrderBy(l => l.time + Cost(l)).ToList(); var pick = new List<Link> { all[0] };
-            while (pick.Count < 8 && pick.Count < all.Count)
-            {
-                var far = all.Where(l => !pick.Contains(l)).OrderByDescending(l => pick.Min(q => (q.from - l.from).sqrMagnitude)).First();
-                pick.Add(far);
-            }
-            if (!thinned.TryGetValue(g.Key.fromRegion, out var list)) thinned[g.Key.fromRegion] = list = new List<Link>();
-            list.AddRange(pick);
+            int c = world.CellAt(l.from, 2f); if (c < 0) continue;
+            if (!thinned.TryGetValue(c, out var list)) thinned[c] = list = new List<Link>();
+            list.Add(l);
         }
         return thinned;
     }
 
-    /// <summary>The quickest way from a to b with walking and the found links; null if there is none.</summary>
+    /// <summary>The quickest way from a to b: one Dijkstra over the walk grid itself. Every cell is a state; running to a neighbour
+    /// costs its real distance / run speed (a little more onto an edge cell, LabWorld.EdgeCost); a found link is a step from the cell
+    /// it starts on to the cell it lands on, costing its time + Cost (penalty, fall damage). So the walking parts are the real paths
+    /// over the grid, not a straight line (the owner, 15.11.2026: from the garage the bot went down and around instead of up the
+    /// stairs — the old search guessed walking as straight line × 1.3 and kept only 8 links per pair of regions). Null if no way.</summary>
     public Route FindRoute(Vector3 a, Vector3 b, int mask = ~0)
     {
-        int ra = world.RegionAt(a, 3f), rb = world.RegionAt(b, 3f);
-        if (ra < 0 || rb < 0) return null;
-        var byRegion = Thinned(mask);
-        var nearA = links.Where(l => l.fromRegion == ra && (mask & (1 << (int)l.move)) != 0 && LabSim.Horizontal(l.from - a) < 25f).ToList();   // all allowed jumps right next to the start
-        var path = new NavMeshPath();
-        // states: -1 = a, i = landing of links[i]
-        var dist = new Dictionary<int, float> { [-1] = 0f }; var prev = new Dictionary<int, int>(); var done = new HashSet<int>();
-        var open = new List<int> { -1 };
-        float bestEnd = float.PositiveInfinity; int bestLast = int.MinValue;
+        int sa = world.CellAt(a, 3f), sb = world.CellAt(b, 3f);
+        if (sa < 0 || sb < 0) return null;
+        var byCell = ByCell();
+        var dist = new Dictionary<int, float> { [sa] = 0f }; var prev = new Dictionary<int, (int cell, Link link)>();
+        var open = new SortedSet<(float d, int c)> { (0f, sa) }; var done = new HashSet<int>();
+        void Relax(int n, float nd, int from, Link via)
+        {
+            if (dist.TryGetValue(n, out float od) && nd >= od) return;
+            dist[n] = nd; prev[n] = (from, via); open.Add((nd, n));
+        }
         while (open.Count > 0)
         {
-            int s = open.OrderBy(x => dist[x]).First(); open.Remove(s);
-            if (!done.Add(s)) continue;
-            float d = dist[s]; if (d >= bestEnd) break;
-            Vector3 pos = s < 0 ? a : links[s].to; int region = s < 0 ? ra : links[s].toRegion;
-            if (region == rb) { float end = d + WalkEstimate(pos, b); if (end < bestEnd) { bestEnd = end; bestLast = s; } }
-            var outs = byRegion.TryGetValue(region, out var o) ? o : new List<Link>();
-            if (s < 0) outs = outs.Concat(nearA).Distinct().ToList();
-            foreach (var l in outs)
+            var cur = open.Min; open.Remove(cur); int c = cur.c;
+            if (!done.Add(c)) continue;
+            if (c == sb) break;
+            float d = dist[c];
+            for (int k = 0; k < 8; k++)
             {
-                int i = l.id; if (done.Contains(i)) continue;
-                float nd = d + WalkEstimate(pos, l.from) + l.time + Cost(l);
-                if (float.IsInfinity(nd)) continue;
-                if (!dist.TryGetValue(i, out float od) || nd < od) { dist[i] = nd; prev[i] = s; open.Add(i); }
+                int n = world.StepTo(c, k); if (n < 0 || done.Contains(n)) continue;
+                Relax(n, d + world.StepCost(c, n) / RunSpeed, c, null);
             }
+            if (byCell.TryGetValue(c, out var ls))
+                foreach (var l in ls)
+                {
+                    if ((mask & (1 << (int)l.move)) == 0) continue;
+                    int n = world.CellAt(l.to, 2f); if (n < 0 || done.Contains(n)) continue;
+                    Relax(n, d + l.time + Cost(l), c, l);
+                }
         }
-        if (bestLast == int.MinValue) return null;
-        var route = new Route { time = bestEnd };
-        var chain = new List<int>(); for (int s = bestLast; s >= 0; s = prev[s]) chain.Add(s); chain.Reverse();
-        Vector3 at = a;
-        foreach (int i in chain)
+        if (!dist.ContainsKey(sb)) return null;
+        var seq = new List<Link>(); for (int c = sb; c != sa; ) { var p = prev[c]; if (p.link != null) seq.Add(p.link); c = p.cell; }
+        seq.Reverse();
+        var route = new Route();
+        Vector3 at = a; float time = 0f;
+        foreach (var l in seq)
         {
-            var l = links[i];
-            if (LabSim.Horizontal(l.from - at) > 1f) route.legs.Add((at, l.from, null));
-            route.legs.Add((l.from, l.to, l)); at = l.to;
+            if (LabSim.Horizontal(l.from - at) > 1f) { route.legs.Add((at, l.from, null)); time += world.WalkDistance(at, l.from) / RunSpeed; }
+            route.legs.Add((l.from, l.to, l)); at = l.to; time += l.time;
         }
-        if (LabSim.Horizontal(b - at) > 1f) route.legs.Add((at, b, null));
+        if (LabSim.Horizontal(b - at) > 1f) { route.legs.Add((at, b, null)); time += world.WalkDistance(at, b) / RunSpeed; }
+        route.time = time;
         return route;
     }
 

@@ -189,3 +189,33 @@ The autotest now explains the biggest grey regions by itself (`-labtest`). For e
 - **Without rockets:**
   - Комиссариат: the hardest of the three test targets still needs a rocket.
   - Ангар, задний двор: now has a route.
+
+## Routes over the grid itself (15.11.2026, after the owner's look)
+
+**The owner's report.** On Форпост, for far targets such as from the garage, the bot went down and around instead of straight on or up the stairs.
+
+**The causes.**
+- **Walking was estimated, not measured.** The route search guessed walking inside a region as a straight line × 1.3 and kept only 8 links per pair of regions.
+- **A walking cost made narrow paths dear.** It charged an extra 2 per edge cell. On a narrow bridge or stairs every cell is an edge cell, so these became 3× dearer.
+
+**Now:**
+- **One Dijkstra over the walk grid** (`LabLinks.FindRoute`):
+  - every cell is a state;
+  - running to a neighbour costs its real distance divided by the run speed;
+  - a link is a step from the cell where it starts to the cell where it lands, costing its time plus `Cost` (the move penalty and fall damage);
+  - all links take part.
+- **Edge cells cost 25% more** (`LabWorld.EdgeCost`). On a wide floor the path keeps a cell away from a drop. Bridges and stairs stay cheap.
+- **The search takes 70–140 ms** per route on the four maps.
+
+**Routes, before → now (the same targets):**
+
+| Map | Route | Before | Now |
+|---|---|---|---|
+| Форпост | 0 | 16.5 s | 9.3 s |
+| Форпост | 1 | 17.1 s | 10.3 s |
+| Форпост | 2 | 17.4 s | 10.1 s |
+| Комиссариат | 0 | 45.9 s | 8.2 s |
+| Ангар, задний двор | 2 | 37.6 s | 9.7 s |
+| Монетный двор | 0 | 19.3 s | 13.6 s |
+
+The bot walked all 12 routes to the target.

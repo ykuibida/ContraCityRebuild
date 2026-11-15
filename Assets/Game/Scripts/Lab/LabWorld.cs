@@ -308,6 +308,14 @@ public class LabWorld
         return best;
     }
 
+    /// <summary>A step onto an edge cell (a drop or a wall next to it) costs EdgeCost more per unit: on a wide floor the path keeps a
+    /// cell away from the drop; on a narrow bridge or stairs (all edge cells) it is only 25% dearer, so the bot still takes them (a
+    /// cost of 2 per cell made them 3× dearer and the routes went down and around).</summary>
+    public const float EdgeCost = 0.25f;
+    public float StepCost(int c, int d) { float l = Vector3.Distance(cells[c], cells[d]); return cellEdge[d] ? l * (1f + EdgeCost) : l; }
+    /// <summary>The cell in direction k (0..7) that cell c walks to, -1 if none.</summary>
+    public int StepTo(int c, int k) => Neighbour(c, k);
+
     IEnumerable<int> Neighbours(int c) { for (int k = 0; k < 8; k++) { int d = Neighbour(c, k); if (d >= 0) yield return d; } }
 
     /// <summary>The cell under this point (feet): its column or the next ones, the floor within tolerance. -1 if none.</summary>
@@ -375,8 +383,7 @@ public class LabWorld
             for (int k = 0; k < 8; k++)
             {
                 int d = Neighbour(c, k); if (d < 0 || closed.Contains(d)) continue;
-                // a step onto an edge cell costs more: the path keeps a cell away from drops (a bot cutting a corner falls off)
-                float ng = g[c] + Vector3.Distance(cells[c], cells[d]) + (cellEdge[d] ? 2f : 0f);
+                float ng = g[c] + StepCost(c, d);
                 if (!g.TryGetValue(d, out float og) || ng < og) { g[d] = ng; prev[d] = c; open.Add((ng + Vector3.Distance(cells[d], cells[t]), d)); }
             }
         }
