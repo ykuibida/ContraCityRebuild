@@ -58,7 +58,11 @@ public static class BuildGame
         Debug.Log("[BuildGame] " + report.summary.result + " " + report.summary.totalSize / (1024 * 1024) + " MB");
         // the map lab (bots step 2): a shortcut next to the game
         if (report.summary.result == UnityEditor.Build.Reporting.BuildResult.Succeeded)
-            File.WriteAllText("Builds/ContraCity/Лаборатория.bat", "@echo off\r\nstart \"\" \"%~dp0ContraCity.exe\" -lab Bit_map\r\n");
+        {
+            foreach (var (sys, ru) in new[] { ("Bit_map", "Комиссариат"), ("Arena_3lvl", "Ангар, задний двор"), ("ShipConteyner", "Монетный двор"), ("ArenaRing", "Форпост") })
+                File.WriteAllText($"Builds/ContraCity/Лаборатория - {ru}.bat", $"@echo off\r\nstart \"\" \"%~dp0ContraCity.exe\" -lab {sys}\r\n");
+            if (File.Exists("Builds/ContraCity/Лаборатория.bat")) File.Delete("Builds/ContraCity/Лаборатория.bat");
+        }
     }
 
     static void CreateLobbyScene()

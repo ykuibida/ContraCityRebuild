@@ -104,6 +104,18 @@ below:
 - **Emotions as temporary modifiers, set by DNA:** tilt after a losing streak (worse decisions), confidence after a streak
   (bolder), fear at low HP (retreat to a medkit), rage after being killed by the same player (goes for revenge).
 
+## Owner's feedback on the lab (15.11.2026)
+
+- **Bots are simulated at 240 fps** (the owner's choice; movement depends on the frame rate, see `step1_motor.md`).
+- The lab looks good (the height colouring especially), but it is too hard to use. There are too many buttons and raw
+  parameters (view pitch, shot delay). It should be more automatic: the lab picks the angles and timings itself.
+- He could not see the bot or the result: Run and Clear looked dead. The result must be visible: the bot actually jumping
+  along the path, the camera showing it.
+- Places behind physical barriers (outside the playable area) are coloured as walkable too. Show and use only what is
+  reachable, so bots never plan into them.
+- Rocket jumps matter less than shotgun jumps but must be there. Players right after spawning (still invulnerable) often fire a
+  rocket under themselves to fly off. Combos too: a rocket first, then shotgun shots in the air.
+
 ## Map lab (owner, 12.11.2026)
 
 The working tool for stage A is a lab inside Unity, not a web page: only the real motor gives 1:1 jumps.
@@ -142,7 +154,7 @@ Pilot: Комиссариат, DM. Stage letters of the first draft (A, B0–B5,
 | 1 | **Simulatable motor:** CharacterMotor takes its time step and input from outside, same maths | replayed recorded input gives the same path 1:1 — **done 15.11.2026** (`step1_motor.md`) |
 | 2 | **Lab base:** load the map, fly camera, existing markers (spawns, pickups, flags), walkable surface for the fighter size, single experiments (put a bot, pick a move, see the trajectory) | the owner can try a jump from any spot — **done 15.11.2026** (`step2_lab.md`) |
 | 3 | **Replays:** a match or a run saved as data, played back with a timeline (kills / deaths marked), speed, scrub, free or follow camera | a recorded run plays back exactly |
-| 4 | **Movement search:** jump, bunnyhop, shotgun jump and shotgun chains, rocket jump, bat; sweeps of angles and timings; the overview map with arcs | **owner checks realism** |
+| 4 | **Movement search:** jump, bunnyhop, shotgun jump and shotgun chains, rocket jump, bat; sweeps of angles and timings; the overview map with arcs | **owner checks realism** — **search, reachability and A→B routes done 15.11.2026** (`step4_lab_routes.md`); owner checks on Комиссариат, Ангар (задний двор), Монетный двор, Форпост pending |
 | 5 | **Tactical layers and map-knowledge file:** sniper lines, choke points, gathering spots, gates / entrances, knock-off ledges, cover, grenade / sticky lobs onto targets; the owner's notes and recordings | **owner checks** |
 | 6 | **Ghost runs:** many bots, sped up, moving by the found links | stats on which links work for whom |
 | 7 | **Bot body (B0):** a real fighter without keyboard in DM: spawns, takes damage, dies, respawns; more than one shooter in the game, damage to bots, kill feed and score | it looks like another player |

@@ -1,8 +1,9 @@
-// Bots step 2: the map lab. ContraCity.exe -lab [map] opens a map without a battle: a free camera, the map's markers, the walkable
-// surface for the fighter, and single movement experiments on a simulated fighter (LabSim). ContraCity.exe -labtest [map] runs the
-// same lab automatically (log "[labtest] ...", screenshots uitest/lab_*.png) and quits.
-//   Camera: right mouse + WASD / Q E (Shift faster).   Ctrl + left click: put the bot there, facing where the camera looks.
-//   Alt + left click: turn the bot towards that point.   Space: run the experiment.   C: clear paths.   F: camera to the bot.
+// Bots steps 2–4: the map lab. ContraCity.exe -lab [map] opens a map without a battle. The lab searches the whole map for jumps by
+// itself (LabLinks; cached in LabData/<map>.links.json next to the game), greys out what cannot be reached from the spawns, and
+// shows routes: left click where the bot starts, left click where it must get to — the bot (the real fighter model) finds the way
+// with running and jumps and goes it. The owner watches (behind the bot or through its eyes) and marks the route real or not
+// (Docs/bots/lab_marks/<map>.jsonl in the project).
+// ContraCity.exe -labtest map1,map2,... runs the same automatically (log "[labtest] ...", screenshots uitest/lab_<map>_*.png).
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -32,6 +33,19 @@ public static class LabDraw
         return lr;
     }
 
+    /// <summary>Many coloured polylines in one mesh (thin GPU lines): the link arcs.</summary>
+    public static GameObject Lines(string name, IEnumerable<(IList<Vector3> pts, Color c)> lines, Transform parent)
+    {
+        var v = new List<Vector3>(); var col = new List<Color>(); var idx = new List<int>();
+        foreach (var (pts, c) in lines)
+            for (int i = 0; i < pts.Count; i++) { if (i > 0) { idx.Add(v.Count - 1); idx.Add(v.Count); } v.Add(pts[i] + Vector3.up * 0.4f); col.Add(c); }
+        var mesh = new Mesh { indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
+        mesh.SetVertices(v); mesh.SetColors(col); mesh.SetIndices(idx, MeshTopology.Lines, 0); mesh.RecalculateBounds();
+        var go = new GameObject(name); go.transform.SetParent(parent, false);
+        go.AddComponent<MeshFilter>().sharedMesh = mesh; go.AddComponent<MeshRenderer>().sharedMaterial = Mat(Color.white);
+        return go;
+    }
+
     public static GameObject Primitive(PrimitiveType t, string name, Vector3 pos, Vector3 scale, Color c, Transform parent)
     {
         var g = GameObject.CreatePrimitive(t); Object.Destroy(g.GetComponent<Collider>());
@@ -52,203 +66,308 @@ public class LabController : MonoBehaviour
         var go = new GameObject("Lab"); DontDestroyOnLoad(go);
         var lab = go.AddComponent<LabController>();
         lab.automated = args[i] == "-labtest";
-        lab.map = i + 1 < args.Length && !args[i + 1].StartsWith("-") ? args[i + 1] : "Bit_map";
+        lab.maps = (i + 1 < args.Length && !args[i + 1].StartsWith("-") ? args[i + 1] : "Bit_map").Split(',');
     }
 
     static void Log(string s) => Debug.Log("[labtest] " + s);
 
-    bool automated; string map = "Bit_map";
-    readonly LabWorld world = new LabWorld();
-    Camera cam; Transform root, markerRoot, pathRoot; GameObject navObj, ghost;
-    bool showMarkers = true, showLabels = true, showNav = true, showPaths = true, ready;
-    readonly LabSim.Params prm = new LabSim.Params();
-    readonly List<(LabSim.Result r, LabSim.Params p)> runs = new List<(LabSim.Result, LabSim.Params)>();
+    static readonly Dictionary<string, string> RuMap = new Dictionary<string, string>
+    {
+        { "Bit_map", "Комиссариат" }, { "Arena_3lvl", "Ангар, задний двор" }, { "ShipConteyner", "Монетный двор" }, { "ArenaRing", "Форпост" },
+        { "Angar", "Ангар" }, { "7000", "Хоздвор" }, { "Arena_well", "Перестройполис" }, { "Cache", "Промзона" }, { "Inferno", "Урбан" },
+        { "LegoTurnament", "Рубеж" }, { "Sniper", "Враг у ворот" }, { "Sniper_night", "Ночь у ворот" }, { "TF3_Arena_map", "Складчина" }, { "Faccility", "Предприятие" },
+    };
+
+    bool automated; string[] maps; string map;
+    LabWorld world; LabLinks links;
+    Camera cam; Transform root, markerRoot, routeRoot; GameObject navObj, linksObj, nearObj, ghost, fighter;
+    bool showMarkers = true, showNav = true, showLinks = false, ready, searching;
     string status = "загрузка…";
-    float statsMultiplier = 1f;
+    float statsMultiplier = 1f; int gatesOpened, doorsOpened;
+
+    // the route on screen
+    Vector3? startPt, targetPt; LabLinks.Route route; LabSim.Result played; string routeText = "";
+    float playT; float speed = 1f; int camMode = 1;   // 0 free, 1 behind the bot, 2 the bot's eyes
+    string marksNote = "";
 
     IEnumerator Start()
     {
         while (UIRoot.Instance == null || GameFlow.Instance == null) yield return null;
         yield return new WaitForSeconds(0.5f);
+        { var keep = new GameObject("tmp"); Dresser.CreateFighter(keep.transform); Destroy(keep); }   // keep the fighter template for the map scene
         var L = UIRoot.Instance.Lobby;
         if (L != null && L.Preview) L.Preview.Active = false;
         UIRoot.Instance.enabled = false;
-        if (!GameFlow.MapAvailable(map)) { status = "нет карты " + map; Log(status); if (automated) Application.Quit(); yield break; }
-        SceneManager.LoadScene(map + "_Viewer");
-        yield return null; yield return null;
-        Setup();
-        if (automated) { yield return AutoTest(); Application.Quit(); }
+        foreach (var m in maps)
+        {
+            map = m;
+            if (!GameFlow.MapAvailable(map)) { status = "нет карты " + map; Log(status); continue; }
+            ready = false;
+            SceneManager.LoadScene(map + "_Viewer");
+            yield return null; yield return null;
+            Setup();
+            if (!links.TryLoad()) { searching = true; yield return links.Search(automated ? 400f : 25f); searching = false; }
+            AfterSearch();
+            if (!automated) yield break;
+            yield return AutoTest();
+        }
+        if (automated) Application.Quit();
     }
 
     void Setup()
     {
         root = new GameObject("LabObjects").transform;
         markerRoot = new GameObject("Markers").transform; markerRoot.SetParent(root, false);
-        pathRoot = new GameObject("Paths").transform; pathRoot.SetParent(root, false);
+        routeRoot = new GameObject("Route").transform; routeRoot.SetParent(root, false);
         cam = FindObjectsByType<Camera>(FindObjectsSortMode.None).Where(c => c.gameObject.scene.name == map + "_Viewer").OrderByDescending(c => c.GetComponent<FlyCamera>() != null).FirstOrDefault();
         if (cam == null) cam = new GameObject("LabCamera").AddComponent<Camera>();
         cam.enabled = true; cam.farClipPlane = Mathf.Max(cam.farClipPlane, 2000f);
-        var fly = cam.GetComponent<FlyCamera>();
-        if (fly == null) fly = cam.gameObject.AddComponent<FlyCamera>();
+        var fly = cam.GetComponent<FlyCamera>(); if (fly == null) fly = cam.gameObject.AddComponent<FlyCamera>();
         fly.enabled = true; fly.moveSpeed = 25f;
         Cursor.lockState = CursorLockMode.None; Cursor.visible = true;
         try { statsMultiplier = BattleStats.Compute(Profile.Current).SpeedMultiplier; } catch { statsMultiplier = 1f; }
 
-        world.Scan();
-        world.BakeNavMesh();
+        world = new LabWorld(); world.Scan(); gatesOpened = world.OpenGates(); doorsOpened = world.OpenDoors(); world.BakeNavMesh();
         foreach (var m in world.markers)
         {
             var c = LabWorld.ColorOf(m.kind);
             LabDraw.Primitive(PrimitiveType.Cylinder, "Pole_" + m.name, m.position + Vector3.up * 4f, new Vector3(0.35f, 4f, 0.35f), new Color(c.r, c.g, c.b, 0.8f), markerRoot);
             LabDraw.Primitive(PrimitiveType.Sphere, "Head_" + m.name, m.position + Vector3.up * 8.5f, Vector3.one * 1.6f, new Color(c.r, c.g, c.b, 0.95f), markerRoot);
         }
-        navObj = new GameObject("WalkableSurface");
-        navObj.transform.SetParent(root, false);
+        navObj = new GameObject("WalkableSurface"); navObj.transform.SetParent(root, false);
         navObj.AddComponent<MeshFilter>().sharedMesh = world.navMesh;
         navObj.AddComponent<MeshRenderer>().sharedMaterial = LabDraw.Mat(new Color(1f, 1f, 1f, 0.3f));   // vertex colours = height
 
-        ghost = LabSim.CreateGhost("LabBot", statsMultiplier, true);
-        var first = world.markers.Where(m => m.onNavMesh && (m.kind == LabWorld.MarkerKind.SpawnT1 || m.kind == LabWorld.MarkerKind.SpawnT0)).Select(m => (Vector3?)m.position).FirstOrDefault();
-        PlaceBot(first ?? world.bounds.center, 0f);
-        FocusBot();
+        ghost = LabSim.CreateGhost("LabBot", statsMultiplier);
+        fighter = MakeFighter();
+        links = new LabLinks(world, ghost, map);
+        startPt = targetPt = null; route = null; played = null; routeText = "";
+        Overview();
         ready = true;
-        status = $"готово: проходимая поверхность {world.navArea:F0} кв. ед., {world.navTriangles} треугольников, {world.bakeMs:F0} мс";
     }
 
-    void PlaceBot(Vector3 feet, float yaw)
+    void AfterSearch()
     {
-        if (Physics.Raycast(feet + Vector3.up * 3f, Vector3.down, out var hit, 20f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore)) feet = hit.point;
-        prm.feet = feet; prm.yaw = yaw;
-        ghost.GetComponent<CharacterMotor>().RestoreState(new CharacterMotor.State { position = feet, rotation = Quaternion.Euler(0f, yaw, 0f), grounded = true, groundNormal = Vector3.up, lastGroundNormal = Vector3.up, lastButtonDownTime = -100f });
+        world.BuildMesh(links.reachable);
+        if (linksObj) Destroy(linksObj);
+        linksObj = LabDraw.Lines("Links", links.links.Select(l => ((IList<Vector3>)l.path, LabSim.ColorOf(l.move))), root);
+        linksObj.SetActive(showLinks);
+        status = links.state;
     }
 
-    void FocusBot()
+    GameObject MakeFighter()
     {
-        var f = Quaternion.Euler(0f, prm.yaw, 0f) * Vector3.forward;
-        cam.transform.position = prm.feet - f * 30f + Vector3.up * 22f;
-        cam.transform.rotation = Quaternion.LookRotation(prm.feet + f * 15f - cam.transform.position);
+        var holder = new GameObject("LabFighter");
+        var f = Dresser.CreateFighter(holder.transform);
+        if (f != null)
+        {
+            var outfit = new Dictionary<int, GameItem>();
+            foreach (var kv in Profile.Current.EquippedWear) { var wi = ItemDB.Get(ItemKind.Wear, kv.Value); if (wi != null) outfit[kv.Key] = wi; }
+            Dresser.Dress(f, outfit);
+            var a = f.GetComponentInChildren<Animation>(); if (a && a["Idle"] != null) a.CrossFade("Idle");
+        }
+        else LabDraw.Primitive(PrimitiveType.Capsule, "Body", Vector3.up * 3.65f, new Vector3(2.6f, 3.25f, 2.6f), new Color(0.6f, 1f, 0.6f, 0.6f), holder.transform);
+        holder.SetActive(false);
+        return holder;
+    }
+
+    void Overview()
+    {
+        var b = world.bounds; var c = new Vector3(b.center.x, world.navMinY, b.center.z);
+        float size = Mathf.Max(b.size.x, b.size.z);
+        cam.transform.position = c + new Vector3(0f, size * 0.55f, -size * 0.45f);
+        cam.transform.rotation = Quaternion.LookRotation(c - cam.transform.position);
         SyncFly();
     }
 
     void SyncFly()
     {
         var fly = cam.GetComponent<FlyCamera>(); if (!fly) return;
-        // FlyCamera keeps its own yaw / pitch (set in Start): put them to the camera's new rotation
         var e = cam.transform.eulerAngles;
-        var fYaw = typeof(FlyCamera).GetField("yaw", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        var fPitch = typeof(FlyCamera).GetField("pitch", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        fYaw?.SetValue(fly, e.y); fPitch?.SetValue(fly, e.x > 180f ? e.x - 360f : e.x);
+        var bf = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        typeof(FlyCamera).GetField("yaw", bf)?.SetValue(fly, e.y);
+        typeof(FlyCamera).GetField("pitch", bf)?.SetValue(fly, e.x > 180f ? e.x - 360f : e.x);
     }
 
-    LabSim.Result RunExperiment(LabSim.Params p, bool draw = true)
+    // ---------------- picking start / target ----------------
+
+    void Pick(Vector3 p)
     {
-        var r = LabSim.Run(ghost, p);
-        runs.Add((r, p.Clone()));
-        if (draw)
-        {
-            var c = LabSim.ColorOf(p.move);
-            LabDraw.Line("Path_" + runs.Count, r.path.Select(x => x + Vector3.up * 0.4f).ToList(), c, 0.45f, pathRoot);
-            if (r.landed) LabDraw.Primitive(PrimitiveType.Cylinder, "Landing_" + runs.Count, r.landing + Vector3.up * 0.1f, new Vector3(2.6f, 0.08f, 2.6f), new Color(c.r, c.g, c.b, 0.9f), pathRoot);
-            foreach (var e in r.events.Where(e => e.what.StartsWith("дробовик: толчок") || e.what.StartsWith("взрыв")))
-                LabDraw.Primitive(PrimitiveType.Sphere, "Hit_" + runs.Count, e.at, Vector3.one * 0.9f, new Color(1f, 0.2f, 0.1f, 0.9f), pathRoot);
-        }
-        // the bot stays where it was put
-        ghost.GetComponent<CharacterMotor>().RestoreState(new CharacterMotor.State { position = p.feet, rotation = Quaternion.Euler(0f, p.yaw, 0f), grounded = true, groundNormal = Vector3.up, lastGroundNormal = Vector3.up, lastButtonDownTime = -100f });
-        status = LabSim.RuName(p.move) + ": " + r.Summary();
-        return r;
+        if (startPt == null || targetPt != null) { ClearRoute(); startPt = p; DrawFlags(); ShowNear(p); return; }
+        targetPt = p; DrawFlags(); if (nearObj) Destroy(nearObj);
+        MakeRoute();
     }
 
-    void ClearPaths() { foreach (Transform t in pathRoot) Destroy(t.gameObject); runs.Clear(); }
+    void ClearRoute()
+    {
+        foreach (Transform t in routeRoot) Destroy(t.gameObject);
+        if (nearObj) Destroy(nearObj);
+        startPt = targetPt = null; route = null; played = null; routeText = ""; marksNote = "";
+        if (fighter) fighter.SetActive(false);
+    }
+
+    void DrawFlags()
+    {
+        foreach (Transform t in routeRoot) if (t.name.StartsWith("Flag")) Destroy(t.gameObject);
+        if (startPt != null) { LabDraw.Primitive(PrimitiveType.Cylinder, "FlagA", startPt.Value + Vector3.up * 6f, new Vector3(0.5f, 6f, 0.5f), new Color(0.2f, 1f, 0.3f, 0.9f), routeRoot); LabDraw.Primitive(PrimitiveType.Cylinder, "FlagA2", startPt.Value + Vector3.up * 0.1f, new Vector3(3f, 0.05f, 3f), new Color(0.2f, 1f, 0.3f, 0.9f), routeRoot); }
+        if (targetPt != null) { LabDraw.Primitive(PrimitiveType.Cylinder, "FlagB", targetPt.Value + Vector3.up * 6f, new Vector3(0.5f, 6f, 0.5f), new Color(1f, 0.2f, 0.2f, 0.9f), routeRoot); LabDraw.Primitive(PrimitiveType.Cylinder, "FlagB2", targetPt.Value + Vector3.up * 0.1f, new Vector3(3f, 0.05f, 3f), new Color(1f, 0.2f, 0.2f, 0.9f), routeRoot); }
+    }
+
+    /// <summary>The jumps that start near the picked point (within 15, same region).</summary>
+    void ShowNear(Vector3 p)
+    {
+        if (nearObj) Destroy(nearObj);
+        int r = world.RegionAt(p, 3f);
+        var near = links.links.Where(l => l.fromRegion == r && LabSim.Horizontal(l.from - p) < 15f).ToList();
+        nearObj = LabDraw.Lines("Near", near.Select(l => ((IList<Vector3>)l.path, LabSim.ColorOf(l.move))), routeRoot);
+        routeText = r < 0 ? "Здесь нет проходимой поверхности: щёлкни на пол, ящик, крышу." : near.Count > 0 ? $"Отсюда рядом {near.Count} прыжков (цветные дуги). Теперь щёлкни, куда боту нужно попасть." : "Рядом прыжков нет. Теперь щёлкни, куда боту нужно попасть.";
+    }
+
+    void MakeRoute()
+    {
+        route = links.FindRoute(startPt.Value, targetPt.Value);
+        if (route == null)
+        {
+            int ra = world.RegionAt(startPt.Value, 3f), rb = world.RegionAt(targetPt.Value, 3f);
+            routeText = ra < 0 || rb < 0 ? "Точка не на проходимой поверхности." : !links.reachable.Contains(rb) ? "Туда не попасть ни бегом, ни найденными прыжками (серая зона)." : "Пути не найдено.";
+            return;
+        }
+        played = links.Play(route, startPt.Value);
+        bool reached = LabSim.Horizontal(played.landing - targetPt.Value) < 3f && Mathf.Abs(played.landing.y - targetPt.Value.y) < 3f;
+        routeText = (reached ? "<b>Маршрут</b> " : "<b>Маршрут</b> (бот не дошёл до цели!) ") + route.Describe();
+        LabDraw.Line("RoutePath", played.path.Where((x, i) => i % 6 == 0).Select(x => x + Vector3.up * 0.5f).ToList(), new Color(1f, 1f, 1f), 0.35f, routeRoot);
+        foreach (var leg in route.legs.Where(l => l.link != null))
+            LabDraw.Line("RouteJump", leg.link.path.Select(x => x + Vector3.up * 0.6f).ToList(), LabSim.ColorOf(leg.link.move), 0.6f, routeRoot);
+        playT = 0f; if (fighter) fighter.SetActive(true); marksNote = "";
+    }
+
+    void SaveMark(bool real)
+    {
+        if (route == null) return;
+        var projectDocs = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "..", "Docs", "bots"));
+        var dir = Directory.Exists(projectDocs) ? Path.Combine(projectDocs, "lab_marks") : Path.Combine(Path.GetDirectoryName(Application.dataPath), "LabData", "marks");
+        Directory.CreateDirectory(dir);
+        var line = JsonUtility.ToJson(new Mark
+        {
+            when = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm"), map = map, real = real, from = startPt.Value, to = targetPt.Value, route = route.Describe(),
+            jumps = route.legs.Where(l => l.link != null).Select(l => $"{l.link.move} {l.link.from} -> {l.link.to} yaw {l.link.yaw:F0}").ToArray(),
+        });
+        File.AppendAllText(Path.Combine(dir, map + ".jsonl"), line + "\n");
+        marksNote = real ? "Отмечено: реально." : "Отмечено: нереально. Разберусь, что не так.";
+    }
+    [System.Serializable] class Mark { public string when, map, route; public bool real; public Vector3 from, to; public string[] jumps; }
+
+    // ---------------- every frame ----------------
 
     void Update()
     {
-        if (!ready || automated) return;
+        if (!ready) return;
         if (markerRoot) markerRoot.gameObject.SetActive(showMarkers);
         if (navObj) navObj.SetActive(showNav);
-        if (pathRoot) pathRoot.gameObject.SetActive(showPaths);
-        bool overUi = new Rect(0, 0, 360, Screen.height).Contains(new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y));
-        if (Input.GetMouseButtonDown(0) && !overUi && (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.LeftAlt)))
+        if (linksObj) linksObj.SetActive(showLinks);
+        if (automated) return;
+        bool overUi = new Rect(0, 0, 380, Screen.height).Contains(new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y));
+        if (Input.GetMouseButtonDown(0) && !overUi && !searching)
         {
             var ray = cam.ScreenPointToRay(Input.mousePosition);
-            if (Physics.Raycast(ray, out var hit, 3000f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore))
-            {
-                if (Input.GetKey(KeyCode.LeftControl)) { var f = cam.transform.forward; f.y = 0f; PlaceBot(hit.point, f.sqrMagnitude > 0.01f ? Quaternion.LookRotation(f).eulerAngles.y : prm.yaw); }
-                else { var d = hit.point - prm.feet; d.y = 0f; if (d.sqrMagnitude > 0.01f) PlaceBot(prm.feet, Quaternion.LookRotation(d).eulerAngles.y); }
-            }
+            if (Physics.Raycast(ray, out var hit, 3000f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore)) Pick(hit.point);
         }
-        if (Input.GetKeyDown(KeyCode.Space)) RunExperiment(prm);
-        if (Input.GetKeyDown(KeyCode.C)) ClearPaths();
-        if (Input.GetKeyDown(KeyCode.F)) FocusBot();
+        if (Input.GetKeyDown(KeyCode.Escape)) ClearRoute();
+        AnimateFighter(Time.deltaTime * speed);
+    }
+
+    void LateUpdate()
+    {
+        if (played == null || camMode == 0 || automated) return;
+        int i = Mathf.Clamp(Mathf.FloorToInt(playT / played.dt), 0, played.path.Count - 1);
+        var p = played.path[i]; var v = played.views[i];
+        if (camMode == 2) { cam.transform.position = LabSim.Eye(p, v.x); cam.transform.rotation = Quaternion.Euler(v.y, v.x, 0f); }
+        else
+        {
+            var back = Quaternion.Euler(0f, v.x, 0f) * new Vector3(0f, 0f, -16f);
+            var want = p + back + Vector3.up * 11f;
+            cam.transform.position = Vector3.Lerp(cam.transform.position, want, 1f - Mathf.Exp(-6f * Time.deltaTime));
+            cam.transform.rotation = Quaternion.LookRotation(p + Vector3.up * 4f - cam.transform.position);
+        }
+        SyncFly();
+    }
+
+    string lastClip;
+    void AnimateFighter(float dt)
+    {
+        if (played == null || played.path.Count == 0 || fighter == null) return;
+        playT += dt;
+        float end = (played.path.Count - 1) * played.dt;
+        if (playT > end + 1.5f) playT = 0f;   // loop with a short pause at the end
+        int i = Mathf.Clamp(Mathf.FloorToInt(playT / played.dt), 0, played.path.Count - 1);
+        var p = played.path[i]; var v = played.views[i];
+        var vel = i > 0 ? (played.path[i] - played.path[i - 1]) / played.dt : Vector3.zero; vel.y = 0f;
+        fighter.transform.position = p;
+        fighter.transform.rotation = Quaternion.Euler(0f, v.x, 0f);   // the body faces where the bot looks (backwards runs for shotgun jumps)
+        var anim = fighter.GetComponentInChildren<Animation>();
+        if (!anim) return;
+        string clip = played.air[i] ? "Jump" : vel.magnitude > 2f ? (Vector3.Dot(vel, fighter.transform.forward) < -1f ? "RunBackwards" : "Run2") : "Idle";
+        if (anim[clip] == null) clip = played.air[i] ? "Jump" : "Idle";
+        if (clip != lastClip && anim[clip] != null) { anim.CrossFade(clip, 0.15f); lastClip = clip; }
+        foreach (AnimationState s in anim) s.speed = speed;
     }
 
     // ---------------- panel ----------------
-    GUIStyle box, label, small;
+    GUIStyle box, label, small, big;
     void OnGUI()
     {
         if (automated) return;
         if (box == null)
         {
             box = new GUIStyle(GUI.skin.box) { alignment = TextAnchor.UpperLeft };
-            label = new GUIStyle(GUI.skin.label) { fontSize = 13, wordWrap = true };
-            small = new GUIStyle(GUI.skin.label) { fontSize = 11, wordWrap = true };
+            label = new GUIStyle(GUI.skin.label) { fontSize = 13, wordWrap = true, richText = true };
+            small = new GUIStyle(GUI.skin.label) { fontSize = 12, wordWrap = true, richText = true };
+            big = new GUIStyle(GUI.skin.label) { fontSize = 16, richText = true };
         }
-        GUILayout.BeginArea(new Rect(8, 8, 344, Screen.height - 16), box);
-        GUILayout.Label($"<b>Лаборатория</b> — {map}", new GUIStyle(label) { richText = true, fontSize = 15 });
-        GUILayout.Label(status, small);
-        if (!ready) { GUILayout.EndArea(); return; }
-        GUILayout.Label($"Метки: {world.markers.Count} (на проходимом {world.markers.Count(m => m.onNavMesh)}); скорость бойца ×{statsMultiplier:F2}", small);
-        GUILayout.BeginHorizontal();
-        showMarkers = GUILayout.Toggle(showMarkers, "метки"); showLabels = GUILayout.Toggle(showLabels, "подписи");
-        showNav = GUILayout.Toggle(showNav, "проходимость"); showPaths = GUILayout.Toggle(showPaths, "пути");
-        GUILayout.EndHorizontal();
-        GUILayout.Space(6);
-        GUILayout.Label("<b>Опыт</b>", new GUIStyle(label) { richText = true });
-        var moves = (LabSim.Move[])System.Enum.GetValues(typeof(LabSim.Move));
-        int sel = System.Array.IndexOf(moves, prm.move);
-        sel = GUILayout.SelectionGrid(sel, moves.Select(LabSim.RuName).ToArray(), 2);
-        prm.move = moves[sel];
-        float Slider(string name, float v, float a, float b, string fmt) { GUILayout.Label($"{name}: {v.ToString(fmt)}", small); return GUILayout.HorizontalSlider(v, a, b); }
-        prm.yaw = Mathf.Repeat(Slider("Направление, °", prm.yaw, 0f, 360f, "F0"), 360f);
-        if (prm.move != LabSim.Move.Jump) prm.runUp = Slider("Разбег, с", prm.runUp, 0f, 2f, "F2");
-        if (prm.move == LabSim.Move.Bunnyhop || prm.move == LabSim.Move.Bat) prm.hops = Mathf.RoundToInt(Slider("Прыжков", prm.hops, 1f, 10f, "F0"));
-        if (prm.move == LabSim.Move.Shotgun || prm.move == LabSim.Move.Rocket)
+        GUILayout.BeginArea(new Rect(8, 8, 364, Screen.height - 16), box);
+        GUILayout.Label($"<b>Лаборатория</b> — {(RuMap.TryGetValue(map ?? "", out var ru) ? ru : map)}", big);
+        if (searching) { GUILayout.Label($"Ищу прыжки по всей карте: {links.progress * 100f:F0}%\n{links.state}\n\nОдин раз для карты, дальше берётся из кеша.", label); GUILayout.EndArea(); return; }
+        if (!ready) { GUILayout.Label(status, label); GUILayout.EndArea(); return; }
+        GUILayout.Label("<b>1.</b> Щёлкни левой кнопкой, <b>откуда</b> бот стартует.\n<b>2.</b> Щёлкни, <b>куда</b> ему нужно попасть.\nБот сам найдёт путь с прыжками и пройдёт его.", label);
+        GUILayout.Space(4);
+        if (routeText != "") GUILayout.Label(routeText, small);
+        if (played != null)
         {
-            prm.pitch = Slider("Наклон взгляда, ° (+ вниз)", prm.pitch, -30f, 89f, "F0");
-            prm.fireDelay = Slider("Выстрел после отрыва, с", prm.fireDelay, 0f, 0.8f, "F2");
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Скорость:", small, GUILayout.Width(70));
+            foreach (var s in new[] { 1f, 0.5f, 0.25f }) if (GUILayout.Toggle(Mathf.Approximately(speed, s), s == 1f ? "1×" : s == 0.5f ? "½×" : "¼×", "Button")) speed = s;
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Камера:", small, GUILayout.Width(70));
+            string[] cams = { "свободная", "за ботом", "глазами" };
+            for (int i = 0; i < 3; i++) if (GUILayout.Toggle(camMode == i, cams[i], "Button")) camMode = i;
+            GUILayout.EndHorizontal();
+            if (GUILayout.Button("С начала")) playT = 0f;
+            GUILayout.Space(4);
+            GUILayout.Label("Так бывает в игре?", label);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("✓ Реально", GUILayout.Height(28))) SaveMark(true);
+            if (GUILayout.Button("✗ Нереально", GUILayout.Height(28))) SaveMark(false);
+            GUILayout.EndHorizontal();
+            if (marksNote != "") GUILayout.Label(marksNote, small);
         }
-        if (prm.move == LabSim.Move.Shotgun)
-        {
-            prm.shots = Mathf.RoundToInt(Slider("Выстрелов в воздухе", prm.shots, 1f, 3f, "F0"));
-            prm.backwards = GUILayout.Toggle(prm.backwards, "спиной к цели, назад на S");
-        }
-        GUILayout.Label($"Кадров в секунду симуляции: {prm.fps:F0}", small);
-        GUILayout.BeginHorizontal();
-        foreach (var f in new[] { 30f, 60f, 144f, 250f }) if (GUILayout.Button(f.ToString("F0"))) prm.fps = f;
-        GUILayout.EndHorizontal();
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Пуск (Space)")) RunExperiment(prm);
-        if (GUILayout.Button("Очистить (C)")) ClearPaths();
-        if (GUILayout.Button("К боту (F)")) FocusBot();
-        GUILayout.EndHorizontal();
-        if (runs.Count > 0)
-        {
-            var (r, p) = runs[runs.Count - 1];
-            GUILayout.Label("<b>Результат</b>", new GUIStyle(label) { richText = true });
-            GUILayout.Label(LabSim.RuName(p.move) + ": " + r.Summary(), small);
-            foreach (var e in r.events.Take(8)) GUILayout.Label($"{e.t:F2} с — {e.what}", small);
-        }
+        if (startPt != null && GUILayout.Button("Сбросить (Esc)")) ClearRoute();
         GUILayout.FlexibleSpace();
-        GUILayout.Label("Камера: ПКМ + WASD / Q E, Shift быстрее\nCtrl + ЛКМ — поставить бота (смотрит туда же, куда камера)\nAlt + ЛКМ — повернуть бота к точке", small);
+        GUILayout.Label("<b>Показывать</b>", small);
+        GUILayout.BeginHorizontal();
+        showNav = GUILayout.Toggle(showNav, "поверхность"); showLinks = GUILayout.Toggle(showLinks, "все прыжки"); showMarkers = GUILayout.Toggle(showMarkers, "метки");
+        GUILayout.EndHorizontal();
+        GUILayout.Label(Legend(), small);
+        GUILayout.Label($"<color=#aaaaaa>{status}</color>", small);
+        GUILayout.Label("<color=#aaaaaa>Камера: правая кнопка + WASD, Q / E, Shift — быстрее.</color>", small);
         GUILayout.EndArea();
+    }
 
-        if (showLabels && showMarkers && cam)
-            foreach (var m in world.markers)
-            {
-                var sp = cam.WorldToScreenPoint(m.position + Vector3.up * 10f);
-                if (sp.z <= 0f || sp.z > 250f) continue;
-                var c = LabWorld.ColorOf(m.kind);
-                GUI.color = c; GUI.Label(new Rect(sp.x - 60, Screen.height - sp.y - 18, 160, 20), LabWorld.RuName(m.kind) + (m.onNavMesh ? "" : " (вне)"), small); GUI.color = Color.white;
-            }
+    static string Legend()
+    {
+        string Hex(Color c) => ColorUtility.ToHtmlStringRGB(c);
+        return string.Join("  ", ((LabSim.Move[])System.Enum.GetValues(typeof(LabSim.Move))).Select(m => $"<color=#{Hex(LabSim.ColorOf(m))}>■</color> {LabSim.RuName(m).ToLowerInvariant()}"))
+            + "\nПоверхность: голубая — низ, малиновая — верх, серая — туда не попасть.";
     }
 
     // ---------------- automated run (-labtest) ----------------
@@ -260,78 +379,54 @@ public class LabController : MonoBehaviour
         Log("picture: uitest/" + name + ".png");
     }
 
-    /// <summary>Of 24 directions, the one with the longest free run for the fighter's capsule (so the test moves are not into a wall).</summary>
-    static float OpenestYaw(Vector3 feet)
-    {
-        float best = 0f, bestYaw = 0f;
-        for (int i = 0; i < 24; i++)
-        {
-            float yaw = i * 15f; var dir = Quaternion.Euler(0f, yaw, 0f) * Vector3.forward;
-            float free = Physics.CapsuleCast(feet + Vector3.up * 2.5f, feet + Vector3.up * 5.5f, 1.2f, dir, out var h, 120f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore) ? h.distance : 120f;
-            if (free > best + 0.01f) { best = free; bestYaw = yaw; }
-        }
-        return bestYaw;
-    }
-
     IEnumerator AutoTest()
     {
-        Log($"map {map}: bounds {world.bounds.center} size {world.bounds.size}, colliders used {world.sources}");
-        Log($"walkable surface: {world.navArea:F0} sq units, heights {world.navMinY:F1}..{world.navMaxY:F1}, {world.navTriangles} triangles, baked in {world.bakeMs:F0} ms (agent r {LabWorld.Agent.agentRadius} h {LabWorld.Agent.agentHeight} step {LabWorld.Agent.agentClimb} slope {LabWorld.Agent.agentSlope} voxel {LabWorld.Agent.voxelSize})");
-        foreach (var g in world.markers.GroupBy(m => m.kind)) Log($"markers {g.Key}: {g.Count()}, on the walkable surface {g.Count(m => m.onNavMesh)}");
-        Log($"weapons: shotgun {LabSim.WeaponName(WeaponType.SHOT_GUN)}, rocket {LabSim.WeaponName(WeaponType.ROCKET_LAUNCHER)}, melee {LabSim.WeaponName(WeaponType.ONE_HANDED_COLD_ARMS)}, stats speed ×{statsMultiplier:F2}");
+        Log($"=== {map}: walkable {world.navArea:F0} sq units, {world.navTriangles} triangles, {world.regionCount} regions, baked in {world.bakeMs:F0} ms; heights {world.navMinY:F1}..{world.navMaxY:F1}");
+        float reachArea = links.reachable.Sum(r => world.regionArea[r]);
+        Log($"{map}: reachable from the spawns {links.reachable.Count} regions, {reachArea:F0} sq units ({100f * reachArea / Mathf.Max(1f, world.navArea):F0}% of the surface); spawns on the surface {world.markers.Count(m => LabWorld.IsSpawn(m.kind) && m.region >= 0)}/{world.markers.Count(m => LabWorld.IsSpawn(m.kind))}");
+        Log($"{map}: search {links.state}; base gate colliders opened {gatesOpened}, automatic doors opened {doorsOpened}");
+        foreach (var g in links.links.GroupBy(l => l.move).OrderBy(g => g.Key)) Log($"{map}: links {g.Key}: {g.Count()} (to another region {g.Count(l => !l.shortcut)}, shortcuts {g.Count(l => l.shortcut)}), best rise +{g.Max(l => l.rise):F1}, longest {g.Max(l => l.distance):F0}");
 
-        // overview from above
-        var oc = cam.orthographic; var op = cam.transform.position; var orot = cam.transform.rotation; var os = cam.orthographicSize;
-        cam.orthographic = true;
-        cam.orthographicSize = Mathf.Max(world.bounds.extents.x / cam.aspect, world.bounds.extents.z) * 0.75f;
-        cam.transform.SetPositionAndRotation(new Vector3(world.bounds.center.x, world.bounds.max.y + 50f, world.bounds.center.z), Quaternion.Euler(90f, 0f, 0f));
-        yield return Shot("lab_overview");
+        // overview: all links over the reachable surface
+        showLinks = true; linksObj.SetActive(true);
+        var b = world.bounds; cam.orthographic = true;
+        cam.orthographicSize = Mathf.Max(b.extents.x / cam.aspect, b.extents.z) * 0.8f;
+        cam.transform.SetPositionAndRotation(new Vector3(b.center.x, world.navMaxY + 60f, b.center.z), Quaternion.Euler(90f, 0f, 0f));
+        yield return Shot($"lab_{map}_links");
+        showLinks = false; linksObj.SetActive(false); cam.orthographic = false;
 
-        // experiments from three spawns, towards the middle of the map
-        var spawns = world.markers.Where(m => m.onNavMesh && (m.kind == LabWorld.MarkerKind.SpawnT1 || m.kind == LabWorld.MarkerKind.SpawnT2 || m.kind == LabWorld.MarkerKind.SpawnT0)).Take(3).ToList();
-        int si = 0;
-        foreach (var sp in spawns)
+        // routes from a spawn to the places the search found hardest to reach: the highest landings of different regions
+        var spawn = world.markers.FirstOrDefault(m => LabWorld.IsSpawn(m.kind) && m.region >= 0 && links.reachable.Contains(m.region));
+        var targets = links.links.Where(l => !l.shortcut).OrderByDescending(l => l.to.y).GroupBy(l => l.toRegion).Select(g => g.First()).Take(3).ToList();
+        int n = 0;
+        foreach (var t in targets)
         {
-            float yaw = OpenestYaw(sp.position);
-            PlaceBot(sp.position, yaw);
-            foreach (var mv in (LabSim.Move[])System.Enum.GetValues(typeof(LabSim.Move)))
+            ClearRoute(); startPt = spawn.position; targetPt = t.to; DrawFlags(); MakeRoute();
+            bool reached = played != null && LabSim.Horizontal(played.landing - t.to) < 3f && Mathf.Abs(played.landing.y - t.to.y) < 3f;
+            Log($"{map}: route {n} from {spawn.kind} {spawn.position} to {t.to} (region {t.toRegion}, +{t.to.y - spawn.position.y:F1}): {(route == null ? "none: " + routeText : $"{route.legs.Count} legs, {route.legs.Count(l => l.link != null)} jumps, reached {reached}, {routeText}")}");
+            if (played != null && n == 0)
             {
-                var p = new LabSim.Params { move = mv, feet = prm.feet, yaw = yaw, fps = 60f };
-                if (mv == LabSim.Move.Rocket) { p.pitch = 85f; p.runUp = 0.4f; p.fireDelay = 0.1f; }
-                if (mv == LabSim.Move.Shotgun) { p.pitch = 50f; p.runUp = 0.3f; p.shots = 2; p.backwards = true; }
-                var r = RunExperiment(p, si == 0);
-                Log($"spawn {si} {sp.kind} {sp.position} yaw {yaw:F0}: {mv}: {(r.landed ? $"air {r.landingT - r.takeoffT:F2} s, distance {r.Distance:F1}, rise {r.Rise:F1}, peak +{r.maxRise:F1}, walkable {r.onWalkable}, fall damage {r.fallDamage}" : $"no landing in {r.time:F1} s, peak +{r.maxRise:F1}")}, events {string.Join(" | ", r.events.Select(e => $"{e.t:F2} {e.what}"))}");
+                // from above over the whole route, then behind the bot in its first jump, then through its eyes
+                var pts = played.path; var rb = new Bounds(pts[0], Vector3.zero); foreach (var p in pts) rb.Encapsulate(p);
+                cam.orthographic = true; cam.orthographicSize = Mathf.Max(rb.extents.x / cam.aspect, rb.extents.z) + 12f;
+                cam.transform.SetPositionAndRotation(new Vector3(rb.center.x, rb.max.y + 8f, rb.center.z), Quaternion.Euler(90f, 0f, 0f));
+                fighter.SetActive(true); playT = (played.path.Count - 1) * played.dt; AnimateFighter(0f);
+                yield return Shot($"lab_{map}_route_top");
+                cam.orthographic = false;
+                int ja = played.air.IndexOf(true); if (ja < 0) ja = played.path.Count / 2;
+                int k = Mathf.Min(ja + 30, played.path.Count - 1);
+                playT = k * played.dt; AnimateFighter(0f);
+                var p0 = played.path[k]; var v0 = played.views[k];
+                cam.transform.position = p0 + Quaternion.Euler(0f, v0.x, 0f) * new Vector3(6f, 0f, -18f) + Vector3.up * 9f;
+                cam.transform.rotation = Quaternion.LookRotation(p0 + Vector3.up * 3f - cam.transform.position);
+                yield return Shot($"lab_{map}_route_jump");
+                fighter.SetActive(false);
+                cam.transform.position = LabSim.Eye(p0, v0.x); cam.transform.rotation = Quaternion.Euler(Mathf.Max(v0.y, 10f), v0.x, 0f);
+                yield return Shot($"lab_{map}_route_eyes");
             }
-            // frame-rate sensitivity: the same running jump at 30 / 60 / 144 / 250 fps
-            if (si == 0)
-                foreach (var f in new[] { 30f, 60f, 144f, 250f })
-                {
-                    var r = LabSim.Run(ghost, new LabSim.Params { move = LabSim.Move.RunJump, feet = prm.feet, yaw = yaw, fps = f });
-                    var b = LabSim.Run(ghost, new LabSim.Params { move = LabSim.Move.Bunnyhop, feet = prm.feet, yaw = yaw, fps = f, hops = 4 });
-                    Log($"fps {f}: running jump distance {r.Distance:F2} air {r.landingT - r.takeoffT:F3} s peak +{r.maxRise:F2}; bunnyhop ×4 covered {Vector3.Distance(new Vector3(b.landing.x, 0, b.landing.z), new Vector3(prm.feet.x, 0, prm.feet.z)):F1} in {b.landingT:F2} s");
-                }
-            si++;
+            n++;
         }
-
-        // the first spawn's experiments: from behind and above, then from straight above
-        cam.orthographic = false;
-        var s0 = spawns.Count > 0 ? spawns[0].position : world.bounds.center;
-        var d0 = world.bounds.center - s0; d0.y = 0f; d0.Normalize();
-        d0 = Quaternion.Euler(0f, OpenestYaw(s0), 0f) * Vector3.forward;
-        PlaceBot(s0, OpenestYaw(s0));
-        cam.transform.position = s0 - d0 * 35f + Vector3.up * 30f + Vector3.Cross(Vector3.up, d0) * 15f;
-        cam.transform.rotation = Quaternion.LookRotation(s0 + d0 * 25f - cam.transform.position);
-        yield return Shot("lab_moves");
-        var pts = runs.Where((x, i) => i < 6).SelectMany(x => x.r.path).ToList();
-        if (pts.Count > 0)
-        {
-            var b = new Bounds(pts[0], Vector3.zero); foreach (var p in pts) b.Encapsulate(p);
-            cam.orthographic = true; cam.orthographicSize = Mathf.Max(b.extents.x / cam.aspect, b.extents.z) + 10f;
-            cam.transform.SetPositionAndRotation(new Vector3(b.center.x, b.max.y + 6f, b.center.z), Quaternion.Euler(90f, 0f, 0f));
-            cam.nearClipPlane = 0.3f;
-            yield return Shot("lab_moves_top");
-        }
-        cam.orthographic = oc; cam.transform.SetPositionAndRotation(op, orot); cam.orthographicSize = os;
-        Log("done");
+        ClearRoute();
+        Log($"{map}: done");
     }
 }
