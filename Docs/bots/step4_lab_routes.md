@@ -253,3 +253,46 @@ The bot walked all 12 routes to the target.
 - **Форпост is the reference.** A change to the grid or the search must leave Форпост's links and routes as they are, or the change is wrong.
 - **Edge support around normal floors is not wanted.** If ledges are added, only where no normal floor is next to them (beams, sills, beam ends).
 - **Beams and ledges where players really climb are on Ангар, задний двор only** (as far as the owner knows). It needs its own solution, to be thought out; why the ball missed the beam by the wall has to be found first.
+
+## Moving quicker: the bat and shotgun dashes, calm and battle modes (16.11.2026)
+
+**What the owner saw (Комиссариат):** the bot ran 140 with the rifle in hand where players run with the bat or push themselves on with the shotgun.
+
+**Measured in the lab** (`-labdiag`, flat open floor, from a standstill):
+
+| How | Speed |
+|---|---|
+| Running, rifle | 16/s |
+| Running or hopping, bat | 20/s (×1.25, one-handed melee) |
+| Hops without shots | no quicker than running with the same weapon |
+| Shotgun, 2 shots at 50°, back first | 39/s |
+| Shotgun, 3 shots at 50° | 42/s (129 in 3 s) |
+
+**What the route does now** (`LabLinks.Build` / `WalkPart` / `TryDash`):
+- **The way is chosen as before** (the Dijkstra, the same jumps). Only the walking parts of the chosen way are covered quicker. The search and the cached jumps are not touched.
+- **Calm mode:** the bat in hand while running. Along each walking part, every 2 cells, the bot tries a shotgun dash (3/2/1 shots at 50° or 30°) aimed at the path point about as far ahead as the dash goes. Each try is simulated on the real motor. It is kept only if it lands back on the path, takes no fall damage, and saves ≥ 0.3 s, counting the slower reload run.
+- **Shells:** a clip of 3, reloaded shell by shell only with the shotgun in hand. After a dash the bot runs on with the shotgun until the clip is full, then takes the bat. A shotgun jump of the route that needs more shells than are loaded waits for them (shown as "ждал перезарядку").
+- **Battle mode:** the rifle in hand, no dashes: exactly the checkpoint routes.
+- **In the lab:** the buttons «спокойно / в бою» above the moves.
+
+**Result** (calm vs battle, the same three test routes per map; all reached):
+
+| Map | Battle (= checkpoint) | Calm | Dashes |
+|---|---|---|---|
+| Форпост | 9.3 / 10.3 / 10.1 s | 8.7 / 9.5 / 9.5 s | 0 (bat only) |
+| Комиссариат | 8.2 / 14.4 / 12.7 s | 7.2 / 10.9 / 9.5 s | 0 / 2 / 2 |
+| Ангар, задний двор | 11.7 / 11.1 / 9.7 s | 10.1 / 8.4 / 8.3 s | 2 / 2 / 1 |
+| Монетный двор | 13.6 / 12.8 / 9.5 s | 10.2 / 9.3 / 8.6 s | 2 / 2 / 1 |
+
+Long run over Комиссариат, 162 on foot: rifle 10.1 s, calm 7.0 s played.
+
+**On short pieces (5–15) a dash does not pay:** the run-up, flight and landing take longer than running with the bat. Dashes pay from about 20–25.
+
+**The owner's rules for the bot's head (to build later, in the battle steps):**
+- **The bot decides where to go itself.** Once it goes and the situation is calm, it speeds up as much as it can (bat, dashes).
+- **With risk it does not run with the bat or dash.** It runs with the rifle (battle mode). Turning its back to an enemy in front to dash is usually wrong.
+- **Exception:** a dash towards cover, a medkit or ammo can make sense even in a fight, when it is needed.
+- **The risk depends on the map:**
+  - Комиссариат: if no enemy is seen, running with the bat is low risk.
+  - Ангар, задний двор: running with the bat is risky, and dashing with the shotgun is a bit risky too. Long dashes are still fine; the bot does not dash short pieces anyway.
+- **Check in practice** once bots play.

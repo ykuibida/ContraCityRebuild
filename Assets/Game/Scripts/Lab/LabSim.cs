@@ -136,13 +136,20 @@ public static class LabSim
         return weapons.FirstOrDefault(w => w.Type == t);
     }
     public static string WeaponName(WeaponType t) { var w = Weapon(t); return w != null ? w.SystemName : "—"; }
+    public static bool Has(WeaponType t) => Weapon(t) != null;
+    /// <summary>ShotController.GetSpeedMultiplier of a weapon in hand: max(1, SpeedValue), × 1.25 for one-handed melee or attribute "R".</summary>
+    public static float SpeedMultiplier(WeaponType t) { var w = Weapon(t); return SpeedMultiplier(w); }
+    static float SpeedMultiplier(CombatWeapon w) => w == null ? 1f : Mathf.Max(1f, w.SpeedValue) * (w.Type == WeaponType.ONE_HANDED_COLD_ARMS || w.Attributes.Contains("R") ? 1.25f : 1f);
+    /// <summary>The shotgun's clip and the seconds to load one shell (the full reload / the clip).</summary>
+    public static int ShotgunClip { get { var w = Weapon(WeaponType.SHOT_GUN); return w != null ? Mathf.Max(1, w.MaxLoadedAmmo) : 3; } }
+    public static float ShotgunShellSeconds { get { var w = Weapon(WeaponType.SHOT_GUN); return w != null ? w.ReloadTime / 1e7f / Mathf.Max(1, w.MaxLoadedAmmo) : 0.5f; } }
 
     static void SetWeapon(GameObject ghost, CombatWeapon w)
     {
         var s = ghost.GetComponent<SoldierController>(); var m = ghost.GetComponent<CharacterMotor>();
         s.simHasWeapon = w != null;
         // ShotController.GetSpeedMultiplier of the weapon in hand: max(1, SpeedValue), × 1.25 for melee or attribute "R"
-        s.simWeaponSpeedMultiplier = w == null ? 1f : Mathf.Max(1f, w.SpeedValue) * (w.Type == WeaponType.ONE_HANDED_COLD_ARMS || w.Attributes.Contains("R") ? 1.25f : 1f);
+        s.simWeaponSpeedMultiplier = SpeedMultiplier(w);
         m.simBatAirFactor = 1.25f;
         var bat = Weapon(WeaponType.ONE_HANDED_COLD_ARMS);
         if (bat != null && string.Equals(bat.SystemName, "OHCA_BasebalBat", System.StringComparison.OrdinalIgnoreCase)) m.simBatAirFactor = Mathf.Max(1f, bat.SpeedValue) * 1.25f;
@@ -292,12 +299,14 @@ public static class LabSim
     // ---------------- walking (a first bot steering: run along the NavMesh path with the real motor) ----------------
 
     /// <summary>Runs from where the ghost stands to <paramref name="target"/> along the walkable surface: each frame it faces the next
-    /// corner of the NavMesh path and holds W (rifle in hand). reached = within 1.5 of the target.</summary>
-    public static Result WalkTo(GameObject ghost, Vector3 target, float fps = BotFps)
+    /// corner of the grid path and holds W, with <paramref name="hold"/> in hand (the bat runs 25% quicker). reached = within 1.5 of
+    /// the target.</summary>
+    public static Result WalkTo(GameObject ghost, Vector3 target, WeaponType hold = WeaponType.MACHINE_GUN, float fps = BotFps)
     {
         var m = ghost.GetComponent<CharacterMotor>(); var s = ghost.GetComponent<SoldierController>();
         MotorTrace.IgnorePlayer(ghost);
-        SetWeapon(ghost, Weapon(WeaponType.MACHINE_GUN));
+        if (Weapon(hold) == null) hold = WeaponType.MACHINE_GUN;
+        SetWeapon(ghost, Weapon(hold));
         float dt = 1f / fps, t = 0f, now = 100f;
         var start = ghost.transform.position;
         var r = new Result { start = start, dt = dt };
@@ -306,7 +315,7 @@ public static class LabSim
         float length = 0f; for (int i = 1; i < corners.Length; i++) length += Vector3.Distance(corners[i - 1], corners[i]);
         float limit = length / 12f + 3f;
         int c = 1; float yaw = ghost.transform.eulerAngles.y;
-        r.path.Add(start); r.views.Add(new Vector2(yaw, 0f)); r.air.Add(false); r.weapons.Add(WeaponType.MACHINE_GUN);
+        r.path.Add(start); r.views.Add(new Vector2(yaw, 0f)); r.air.Add(false); r.weapons.Add(hold);
         while (t < limit)
         {
             var pos = ghost.transform.position;
@@ -322,7 +331,7 @@ public static class LabSim
             s.Step(SoldierController.Keys.Moves(false, false, facing, false), dt, now);
             m.Step(dt, now);
             t += dt; now += dt;
-            r.path.Add(ghost.transform.position); r.views.Add(new Vector2(yaw, 0f)); r.air.Add(!m.grounded); r.weapons.Add(WeaponType.MACHINE_GUN);
+            r.path.Add(ghost.transform.position); r.views.Add(new Vector2(yaw, 0f)); r.air.Add(!m.grounded); r.weapons.Add(hold);
         }
         r.time = t; r.landing = ghost.transform.position;
         return r;

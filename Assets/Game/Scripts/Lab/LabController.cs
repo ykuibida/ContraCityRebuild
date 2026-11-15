@@ -90,6 +90,7 @@ public class LabController : MonoBehaviour
     float playT; float speed = 1f; int camMode = 1;   // 0 free, 1 behind the bot, 2 the bot's eyes
     string marksNote = "", snapNote = "";
     int allowedMask = ~0;   // bit per LabSim.Move: which moves the routes and the drawn jumps may use
+    bool calm = true;       // the route's mode: calm (bat, shotgun dashes) or in battle (rifle in hand), LabLinks.FindRoute
     BodyWeapons fighterWeapons; WeaponType shownWeapon = WeaponType.NONE;
 
     // ---- walk yourself (G): the owner plays a normal fighter; the steps show where the lab is wrong and teach it ----
@@ -395,7 +396,7 @@ public class LabController : MonoBehaviour
 
     void MakeRoute()
     {
-        route = links.FindRoute(startPt.Value, targetPt.Value, allowedMask);
+        route = links.FindRoute(startPt.Value, targetPt.Value, allowedMask, calm);
         if (route == null)
         {
             int ra = world.RegionAt(startPt.Value, 3f), rb = world.RegionAt(targetPt.Value, 3f);
@@ -558,6 +559,17 @@ public class LabController : MonoBehaviour
         }
         if (startPt != null && GUILayout.Button("Сбросить (Esc)")) ClearRoute();
         GUILayout.FlexibleSpace();
+        {
+            // calm: no enemy near — the bat in hand and shotgun dashes on the runs; in battle: the rifle in hand, plain running
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Режим:", small, GUILayout.Width(70));
+            bool was = calm;
+            if (GUILayout.Toggle(calm, "спокойно", "Button")) calm = true;
+            if (GUILayout.Toggle(!calm, "в бою", "Button")) calm = false;
+            GUILayout.EndHorizontal();
+            GUILayout.Label(calm ? "Врагов рядом нет: бежит с битой, длинные прямые куски — рывками дробовика." : "Враг может выйти: бежит с автоматом в руках, без рывков.", small);
+            if (calm != was) FilterChanged();
+        }
         GUILayout.Label("<b>Бот может использовать</b>", small);
         {
             var moves = (LabSim.Move[])System.Enum.GetValues(typeof(LabSim.Move)); int before = allowedMask;
@@ -814,6 +826,8 @@ public class LabController : MonoBehaviour
             Log($"{map}: route {n} search {routeMs:F0} ms");
             bool reached = played != null && LabSim.Horizontal(played.landing - t.to) < 3f && Mathf.Abs(played.landing.y - t.to.y) < 3f;
             Log($"{map}: route {n} from {spawn.kind} {spawn.position} to {t.to} (region {t.toRegion}, +{t.to.y - spawn.position.y:F1}): {(route == null ? "none: " + routeText : $"{route.legs.Count} legs, {route.legs.Count(l => l.link != null)} jumps, reached {reached}, {routeText}")}");
+            if (route != null) Log($"{map}: route {n} dashes {route.dashes}, reload wait {route.reloadWait:F1} s");
+            { var battle = links.FindRoute(spawn.position, t.to, allowedMask, false); Log($"{map}: route {n} in battle: {(battle == null ? "none" : battle.Describe())}"); }
             if (played != null) foreach (var e in played.events.Where(e => e.what.StartsWith("MISS"))) Log($"{map}: route {n} {e.what}");
             if (route != null && !reached) for (int li = 0; li < route.legs.Count; li++) { var lg = route.legs[li]; Log($"{map}: route {n} leg {li}: {(lg.link != null ? $"{lg.link.move} {lg.link.from} -> {lg.link.to} yaw {lg.link.yaw:F0} observed {lg.link.observed}" : $"walk to {lg.to}")}"); }
             if (played != null && n == 0)
@@ -837,6 +851,30 @@ public class LabController : MonoBehaviour
                 yield return Shot($"lab_{map}_route_eyes");
             }
             n++;
+        }
+        // a long run over the spawn's own floor (the owner, 16.11.2026: the bot ran 140 with the rifle where players dash with the
+        // shotgun or run with the bat): the first cell of the spawn region 130–170 away on foot
+        if (spawn.region >= 0)
+        {
+            var far = Enumerable.Range(0, world.cellCount).Where(c => world.cellRegion[c] == spawn.region && (c % 37) == 0)
+                .Select(c => world.cells[c]).Where(p => LabSim.Horizontal(p - spawn.position) > 100f)
+                .Select(p => (p, d: world.WalkDistance(spawn.position, p))).Where(x => x.d > 130f && x.d < 170f).Take(1).ToList();
+            if (far.Count > 0)
+            {
+                ClearRoute(); startPt = spawn.position; targetPt = far[0].p; DrawFlags();
+                var rsw = System.Diagnostics.Stopwatch.StartNew(); MakeRoute(); float ms = (float)rsw.Elapsed.TotalMilliseconds;
+                bool reached = played != null && LabSim.Horizontal(played.landing - far[0].p) < 3f && Mathf.Abs(played.landing.y - far[0].p.y) < 3f;
+                Log($"{map}: long run {far[0].d:F0} on foot (rifle {far[0].d / 16.12f:F1} s) to {far[0].p}: {(route == null ? "none" : $"dashes {route.dashes}, reached {reached}, played {played.time:F1} s, {routeText}")}; route + play {ms:F0} ms");
+                if (played != null) foreach (var e in played.events.Where(e => e.what.StartsWith("MISS"))) Log($"{map}: long run {e.what}");
+                if (played != null)
+                {
+                    var pts = played.path; var rb = new Bounds(pts[0], Vector3.zero); foreach (var p in pts) rb.Encapsulate(p);
+                    cam.orthographic = true; cam.orthographicSize = Mathf.Max(rb.extents.x / cam.aspect, rb.extents.z) + 12f;
+                    cam.transform.SetPositionAndRotation(new Vector3(rb.center.x, rb.max.y + 8f, rb.center.z), Quaternion.Euler(90f, 0f, 0f));
+                    yield return Shot($"lab_{map}_long_run");
+                    cam.orthographic = false;
+                }
+            }
         }
         // the same first target without rockets (the owner's filter)
         if (targets.Count > 0)

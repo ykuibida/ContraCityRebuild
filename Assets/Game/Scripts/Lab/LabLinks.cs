@@ -27,6 +27,7 @@ public class LabLinks
     {
         public LabSim.Move move; public Vector3 from, to; public float yaw, runUp, pitch, fireDelay; public int hops, shots; public bool backwards;
         public float time, rise, peak, distance; public int fromRegion, toRegion, fallDamage; public bool shortcut, observed, taught;   // taught: found by repeating a jump the owner made in walk mode
+        [System.NonSerialized] public bool dash;   // a shotgun dash along a walking part of a route (made for the route, not in the cache)
         public Vector3[] path;   // decimated, for drawing
         [System.NonSerialized] public int id;
         public LabSim.Params Params() => new LabSim.Params { move = move, feet = from, yaw = yaw, runUp = runUp, pitch = pitch, fireDelay = fireDelay, hops = hops, shots = shots, backwards = backwards, fps = LabSim.BotFps };
@@ -297,11 +298,15 @@ public class LabLinks
     public class Route
     {
         public readonly List<(Vector3 from, Vector3 to, Link link)> legs = new List<(Vector3, Vector3, Link)>();   // link == null: walk
-        public float time;
+        public readonly List<WeaponType> hold = new List<WeaponType>();   // per leg: the weapon in hand on a walk leg (NONE for a jump)
+        public float time, reloadWait;   // reloadWait: seconds the bot stood before a shotgun jump for shells
+        public int dashes;
         public string Describe()
         {
-            var parts = legs.Select(l => l.link == null ? $"бег {LabSim.Horizontal(l.to - l.from):F0}" : LabSim.RuName(l.link.move).ToLowerInvariant() + $" ({l.link.Params().Recipe()})" + (l.link.fallDamage > 0 ? $" [−{l.link.fallDamage} HP от падения]" : ""));
-            return $"≈{time:F1} с: " + string.Join(" → ", parts);
+            var parts = legs.Select((l, i) => l.link == null
+                ? $"бег {LabSim.Horizontal(l.to - l.from):F0}" + (hold[i] == WeaponType.ONE_HANDED_COLD_ARMS ? " с битой" : hold[i] == WeaponType.SHOT_GUN ? " с дробовиком (перезаряжает)" : "")
+                : (l.link.dash ? "рывок дробовиком" : LabSim.RuName(l.link.move).ToLowerInvariant()) + $" ({l.link.Params().Recipe()})" + (l.link.fallDamage > 0 ? $" [−{l.link.fallDamage} HP от падения]" : ""));
+            return $"≈{time:F1} с: " + string.Join(" → ", parts) + (reloadWait > 0.05f ? $"; ждал перезарядку {reloadWait:F1} с" : "");
         }
     }
 
@@ -344,7 +349,7 @@ public class LabLinks
     /// it starts on to the cell it lands on, costing its time + Cost (penalty, fall damage). So the walking parts are the real paths
     /// over the grid, not a straight line (the owner, 15.11.2026: from the garage the bot went down and around instead of up the
     /// stairs — the old search guessed walking as straight line × 1.3 and kept only 8 links per pair of regions). Null if no way.</summary>
-    public Route FindRoute(Vector3 a, Vector3 b, int mask = ~0)
+    public Route FindRoute(Vector3 a, Vector3 b, int mask = ~0, bool calm = true)
     {
         int sa = world.CellAt(a, 3f), sb = world.CellAt(b, 3f);
         if (sa < 0 || sb < 0) return null;
@@ -378,16 +383,135 @@ public class LabLinks
         if (!dist.ContainsKey(sb)) return null;
         var seq = new List<Link>(); for (int c = sb; c != sa; ) { var p = prev[c]; if (p.link != null) seq.Add(p.link); c = p.cell; }
         seq.Reverse();
+        return Build(a, b, seq, mask, calm);
+    }
+
+    // ---------------- moving quicker on the walking parts (the owner, 16.11.2026, Комиссариат) ----------------
+    // Players do not run long stretches with the rifle: they run with the bat (×1.25: 20/s instead of 16) or push themselves on
+    // with the shotgun (lab, flat floor: 2 shots ≈ 39/s, 3 shots ≈ 42/s). The route keeps the jumps Dijkstra chose; then each
+    // walking part is covered the quickest way the bot can: shotgun dashes where the way ahead is open (each simulated on the real
+    // motor and kept only if it lands back on the walking path, no fall damage, ≥ 0.7 s quicker), the bat in between. The shells
+    // count: a clip of ShotgunClip, reloaded shell by shell only with the shotgun in hand (so after a dash the bot runs on with
+    // it, 16/s, until the clip is full, then takes the bat); a shotgun jump of the route that needs more shells than are loaded
+    // waits for them. The search and the cached jumps are not touched. Only in the calm mode (no enemy near, the owner
+    // 16.11.2026); in battle the bot runs with the rifle in hand and no dashes — the routes of the checkpoint.
+
+    const float DashMinLeft = 20f, DashMinGain = 0.3f;
+    class Ammo { public float loaded; public int clip; public float perShell; }
+
+    Route Build(Vector3 a, Vector3 b, List<Link> seq, int mask, bool calm)
+    {
+        bool bat = calm && (mask & (1 << (int)LabSim.Move.Bat)) != 0 && LabSim.Has(WeaponType.ONE_HANDED_COLD_ARMS);
+        bool dash = calm && (mask & (1 << (int)LabSim.Move.Shotgun)) != 0 && LabSim.Has(WeaponType.SHOT_GUN);
+        var ammo = new Ammo { clip = LabSim.ShotgunClip, loaded = LabSim.ShotgunClip, perShell = LabSim.ShotgunShellSeconds };
         var route = new Route();
         Vector3 at = a; float time = 0f;
         foreach (var l in seq)
         {
-            if (LabSim.Horizontal(l.from - at) > 1f) { route.legs.Add((at, l.from, null)); time += world.WalkDistance(at, l.from) / RunSpeed; }
-            route.legs.Add((l.from, l.to, l)); at = l.to; time += l.time;
+            if (LabSim.Horizontal(l.from - at) > 1f) time += WalkPart(route, at, l.from, ammo, bat, dash);
+            int need = l.move == LabSim.Move.Shotgun || l.move == LabSim.Move.RocketShotgun ? l.shots : 0;
+            if (need > 0 && dash)
+            {
+                if (ammo.loaded < need) { float wait = (need - ammo.loaded) * ammo.perShell; route.reloadWait += wait; time += wait; ammo.loaded = need; }
+                ammo.loaded -= need;
+            }
+            route.legs.Add((l.from, l.to, l)); route.hold.Add(WeaponType.NONE); at = l.to; time += l.time;
         }
-        if (LabSim.Horizontal(b - at) > 1f) { route.legs.Add((at, b, null)); time += world.WalkDistance(at, b) / RunSpeed; }
+        if (LabSim.Horizontal(b - at) > 1f) time += WalkPart(route, at, b, ammo, bat, dash);
         route.time = time;
         return route;
+    }
+
+    float RunWith(WeaponType w) => RunSpeed * LabSim.SpeedMultiplier(w);
+
+    /// <summary>A walking part from a to b: shotgun dashes where they pay, running in between. Adds the legs, returns the time.</summary>
+    float WalkPart(Route route, Vector3 a, Vector3 b, Ammo ammo, bool bat, bool dash)
+    {
+        var path = world.FindPath(a, b);
+        if (path == null || path.Count < 2) return Run(route, a, b, ammo, bat);
+        var cum = new float[path.Count]; for (int i = 1; i < path.Count; i++) cum[i] = cum[i - 1] + Vector3.Distance(path[i - 1], path[i]);
+        float time = 0f; Vector3 at = a; int atIdx = 0;
+        for (int i = 0; dash && i < path.Count - 1; i += 2)
+        {
+            if (cum[cum.Length - 1] - cum[i] < DashMinLeft) break;
+            // the shells loaded by the time the bot gets to path[i] (it reloads while running with the shotgun)
+            float loadedThere = Mathf.Min(ammo.clip, ammo.loaded + (cum[i] - cum[atIdx]) / RunWith(WeaponType.SHOT_GUN) / ammo.perShell);
+            if (loadedThere < 1f) continue;
+            var (link, j) = TryDash(path, cum, i, loadedThere, bat);
+            if (link == null) continue;
+            if (LabSim.Horizontal(link.from - at) > 1f) time += Run(route, at, link.from, ammo, bat);
+            ammo.loaded = Mathf.Max(0f, ammo.loaded - link.shots);
+            route.legs.Add((link.from, link.to, link)); route.hold.Add(WeaponType.NONE); route.dashes++;
+            time += link.time; at = link.to; atIdx = j; i = j - 2;
+        }
+        if (LabSim.Horizontal(b - at) > 1f) time += Run(route, at, b, ammo, bat);
+        return time;
+    }
+
+    /// <summary>Running from a to b: with the shotgun while its clip is not full (it reloads), then with the bat (or the rifle).</summary>
+    float Run(Route route, Vector3 a, Vector3 b, Ammo ammo, bool bat)
+    {
+        float d = world.WalkDistance(a, b); if (float.IsInfinity(d)) d = LabSim.Horizontal(b - a);
+        var after = bat ? WeaponType.ONE_HANDED_COLD_ARMS : WeaponType.MACHINE_GUN;
+        float sgSpeed = RunWith(WeaponType.SHOT_GUN);
+        if (ammo.loaded >= ammo.clip - 0.01f || !LabSim.Has(WeaponType.SHOT_GUN))
+        {
+            route.legs.Add((a, b, null)); route.hold.Add(after); return d / RunWith(after);
+        }
+        float reloadDist = (ammo.clip - ammo.loaded) * ammo.perShell * sgSpeed;
+        if (reloadDist >= d - 1f)
+        {
+            ammo.loaded = Mathf.Min(ammo.clip, ammo.loaded + d / sgSpeed / ammo.perShell);
+            route.legs.Add((a, b, null)); route.hold.Add(WeaponType.SHOT_GUN); return d / sgSpeed;
+        }
+        // reloaded on the way: split the run where the clip is full
+        ammo.loaded = ammo.clip;
+        var path = world.FindPath(a, b); Vector3 split = Vector3.Lerp(a, b, reloadDist / d);
+        if (path != null) { float s = 0f; for (int i = 1; i < path.Count; i++) { float l = Vector3.Distance(path[i - 1], path[i]); if (s + l >= reloadDist) { split = path[i]; break; } s += l; } }
+        route.legs.Add((a, split, null)); route.hold.Add(WeaponType.SHOT_GUN);
+        route.legs.Add((split, b, null)); route.hold.Add(after);
+        return reloadDist / sgSpeed + (d - reloadDist) / RunWith(after);
+    }
+
+    /// <summary>A shotgun dash from path[i] on along the path: 3, 2 or 1 shots (as many as are loaded), aimed at the path point about
+    /// as far ahead as the dash goes. The quickest that lands back on the path (no fall damage) and saves ≥ DashMinGain; (null, -1)
+    /// if none.</summary>
+    (Link, int) TryDash(List<Vector3> path, float[] cum, int i, float loaded, bool bat)
+    {
+        Link best = null; int bestJ = -1; float bestGain = DashMinGain;
+        float runSpeed = RunWith(bat ? WeaponType.ONE_HANDED_COLD_ARMS : WeaponType.MACHINE_GUN);
+        int region = world.RegionAt(path[i], 2f);
+        foreach (var (shots, reach, pitch) in new[] { (3, 120f, 50f), (2, 80f, 50f), (2, 70f, 30f), (1, 35f, 50f), (1, 30f, 30f) })
+        {
+            if (shots > loaded + 0.01f) continue;
+            float left = cum[cum.Length - 1] - cum[i]; if (left < reach * 0.6f) continue;
+            int k = i; while (k < path.Count - 1 && cum[k] - cum[i] < Mathf.Min(reach, left)) k++;
+            var dir = path[k] - path[i]; dir.y = 0f; if (dir.sqrMagnitude < 1f) continue;
+            float yaw = Quaternion.LookRotation(dir).eulerAngles.y; var fwd = Quaternion.Euler(0f, yaw, 0f) * Vector3.forward;
+            var p = new LabSim.Params { move = LabSim.Move.Shotgun, runUp = 0.3f, shots = shots, pitch = pitch, backwards = true, fireDelay = 0.15f };
+            float back = RunUpLength(p); var from = path[i] - fwd * back;
+            if (world.RegionAt(from) != region || Physics.CapsuleCast(from + Vector3.up * 2.6f, from + Vector3.up * 5.4f, 1.2f, fwd, back, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore)) continue;
+            if (!world.Snap(from, 1.5f, out var feet)) continue;
+            p.feet = feet; p.yaw = yaw; p.fps = LabSim.BotFps; p.maxTime = 6f;
+            var r = LabSim.Run(ghost, p); sims++;
+            if (!r.landed || !r.onWalkable || r.fallDamage > 0) continue;
+            int j = -1;
+            for (int q = path.Count - 1; q > i; q--) if (LabSim.Horizontal(path[q] - r.landing) < 3.5f && Mathf.Abs(path[q].y - r.landing.y) < 2f) { j = q; break; }
+            if (j < 0) continue;
+            // the shells it spends are reloaded running with the shotgun (16/s) instead of the bat: that slowness counts against it
+            // (Форпост: a dash that saved 0.3 s made the whole route 0.1 s slower)
+            float reloadLoss = bat ? shots * LabSim.ShotgunShellSeconds * (1f - RunWith(WeaponType.SHOT_GUN) / runSpeed) : 0f;
+            float gain = (cum[j] - cum[i]) / runSpeed - r.time - reloadLoss;
+            if (gain <= bestGain) continue;
+            bestGain = gain; bestJ = j;
+            best = new Link
+            {
+                move = p.move, from = p.feet, to = r.landing, yaw = yaw, runUp = p.runUp, pitch = p.pitch, fireDelay = p.fireDelay, shots = shots, backwards = true,
+                time = r.time, rise = r.Rise, peak = r.maxRise, distance = LabSim.Horizontal(r.landing - p.feet), fromRegion = region, toRegion = region, dash = true,
+                path = r.path.Where((x, n) => n % 24 == 0 || n == r.path.Count - 1).ToArray(), id = -1,
+            };
+        }
+        return (best, bestJ);
     }
 
     /// <summary>Plays the route on the ghost: one recording of the whole way (positions, view, in the air) for the replay.</summary>
@@ -395,10 +519,11 @@ public class LabLinks
     {
         var all = new LabSim.Result { start = a, dt = 1f / LabSim.BotFps };
         LabSim.Place(ghost, a, 0f);
-        foreach (var leg in route.legs)
+        for (int li = 0; li < route.legs.Count; li++)
         {
+            var leg = route.legs[li];
             LabSim.Result r;
-            if (leg.link == null) r = LabSim.WalkTo(ghost, leg.to);
+            if (leg.link == null) r = LabSim.WalkTo(ghost, leg.to, route.hold[li]);
             else
             {
                 var p = leg.link.Params();
