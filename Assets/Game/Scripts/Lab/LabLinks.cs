@@ -20,17 +20,17 @@ using UnityEngine.AI;
 
 public class LabLinks
 {
-    public const int Version = 8;   // 7: the walk grid instead of the NavMesh; 8: floors under floors of one collider, doors out, landings that hold 0.3 s   // bump when the search or LabSim changes: cached files of another version are ignored
+    public const int Version = 9;   // 7: the walk grid instead of the NavMesh; 8: floors under floors of one collider, doors out, landings that hold 0.3 s; 9: onto a small top and off it firing, aimed tries from the nearest spots in 3D   // bump when the search or LabSim changes: cached files of another version are ignored
 
     [System.Serializable]
     public class Link
     {
-        public LabSim.Move move; public Vector3 from, to; public float yaw, runUp, pitch, fireDelay; public int hops, shots; public bool backwards;
+        public LabSim.Move move; public Vector3 from, to; public float yaw, runUp, pitch, fireDelay; public int hops, shots, firstShotHop; public bool backwards;
         public float time, rise, peak, distance; public int fromRegion, toRegion, fallDamage; public bool shortcut, observed, taught;   // taught: found by repeating a jump the owner made in walk mode
         [System.NonSerialized] public bool dash;   // a shotgun dash along a walking part of a route (made for the route, not in the cache)
         public Vector3[] path;   // decimated, for drawing
         [System.NonSerialized] public int id;
-        public LabSim.Params Params() => new LabSim.Params { move = move, feet = from, yaw = yaw, runUp = runUp, pitch = pitch, fireDelay = fireDelay, hops = hops, shots = shots, backwards = backwards, fps = LabSim.BotFps };
+        public LabSim.Params Params() => new LabSim.Params { move = move, feet = from, yaw = yaw, runUp = runUp, pitch = pitch, fireDelay = fireDelay, hops = hops, shots = shots, backwards = backwards, firstShotHop = Mathf.Max(1, firstShotHop), fps = LabSim.BotFps };
     }
 
     [System.Serializable] class File_ { public int version; public string map; public int triangles, regions; public float seconds; public int sims; public List<Link> links; public List<int> reachable; }
@@ -81,6 +81,17 @@ public class LabLinks
         yield return new LabSim.Params { move = LabSim.Move.Bat, runUp = 0.6f, hops = 2 };
     }
 
+    /// <summary>Phase 2 (aimed at a grey region) tries more: climbs with the shotgun fired early (0.08 s after the take-off) and nearly
+    /// straight down. The edge moves fire at 0.15 s: from the yellow roof of Комиссариат they peaked at +10.7, the small roof is +14
+    /// up; the owner's shot (repeated: 85°, 0.08 s) rose +15.</summary>
+    static IEnumerable<LabSim.Params> AimVariants(Vector3 feet, float yaw)
+    {
+        foreach (var p in Variants(feet, yaw)) yield return p;
+        yield return new LabSim.Params { move = LabSim.Move.Shotgun, runUp = 0f, shots = 1, pitch = 85f, backwards = true, fireDelay = 0.08f };
+        yield return new LabSim.Params { move = LabSim.Move.Shotgun, runUp = 0f, shots = 2, pitch = 85f, backwards = true, fireDelay = 0.08f };
+        yield return new LabSim.Params { move = LabSim.Move.Shotgun, runUp = 0.3f, shots = 2, pitch = 70f, backwards = true, fireDelay = 0.08f };
+    }
+
     /// <summary>Distance covered by the run-up before the jump (the run starts this far behind the start spot).</summary>
     static float RunUpLength(LabSim.Params p) => p.runUp <= 0.01f || p.move == LabSim.Move.Walk ? 0f : p.runUp * (p.move == LabSim.Move.Bat ? 20f : 16f) * 0.85f;
 
@@ -91,33 +102,25 @@ public class LabLinks
         queue = new Queue<int>();
         foreach (var m in world.markers) if (LabWorld.IsSpawn(m.kind) && m.region >= 0 && reachable.Add(m.region)) queue.Enqueue(m.region);
         best = new Dictionary<(int, int, int, int, int, int), Link>();
-        edgesDone = 0; edgesTotal = world.boundary.Count; int probes = 0;
+        edgesDone = 0; edgesTotal = world.boundary.Count; int probes = 0; chainDone = new HashSet<int>();
 
         for (int round = 0; round < 4; round++)
         {
             // phase 1: from the edges of every reachable region, three directions per spot
             yield return Phase1(frameBudgetMs, frame);
-            // phase 2: aimed tries at what is still grey. The edge directions can miss a way in (a gap between fences, a beam end): for
-            // every unreachable region near the reachable ones, from the 6 nearest reachable spots, every move aimed straight at it.
             int before = reachable.Count;
+            // phase 1b: onto a small top (a barrel, a crate) and at once off it firing the shotgun: the top has no room for a run-up
+            // of its own, the run on the floor before it gives the speed (the owner, 15.11.2026, Комиссариат: barrel → roof)
+            yield return ChainPhase(frameBudgetMs, frame);
+            // phase 2: aimed tries at what is still grey. The edge directions can miss a way in (a gap between fences, a beam end): for
+            // every unreachable region near the reachable ones, from the 8 nearest reachable spots, every move aimed straight at it.
             // every 3rd reachable cell is enough to aim from (cells are 1 unit)
             var reachTris = new List<int>(); for (int t = 0; t < world.cellCount; t += 3) if (reachable.Contains(world.cellRegion[t])) reachTris.Add(t);
             var greyRegions = Enumerable.Range(0, world.regionCount).Where(r => !reachable.Contains(r) && world.regionArea[r] >= 20f).ToList();
             foreach (int u in greyRegions)
             {
                 if (reachable.Contains(u)) continue;
-                var uTris = Enumerable.Range(0, world.cellCount).Where(t => world.cellRegion[t] == u).Select(t => world.cells[t]).Where((x, k) => k % 4 == 0).ToList();
-                if (uTris.Count == 0) continue;
-                // the reachable spots nearest to the region (horizontally within 60), at least 5 apart
-                var cands = new List<(Vector3 from, Vector3 at, float d)>();
-                foreach (int t in reachTris)
-                {
-                    var c = world.cells[t]; Vector3 at = uTris[0]; float bd = float.MaxValue;
-                    foreach (var q in uTris) { float d = LabSim.Horizontal(q - c); if (d < bd) { bd = d; at = q; } }
-                    if (bd < 60f) cands.Add((c, at, bd));
-                }
-                var starts = new List<(Vector3 from, Vector3 at)>();
-                foreach (var c in cands.OrderBy(x => x.d)) { if (starts.All(s0 => LabSim.Horizontal(s0.from - c.from) > 5f)) starts.Add((c.from, c.at)); if (starts.Count >= 6) break; }
+                var starts = AimStarts(u, reachTris);
                 foreach (var (from0, at) in starts)
                 {
                     var h0 = from0;
@@ -125,7 +128,7 @@ public class LabLinks
                     var to = at - h0; to.y = 0f; if (to.sqrMagnitude < 0.01f) continue;
                     float yaw0 = Quaternion.LookRotation(to).eulerAngles.y;
                     foreach (float dy in new[] { 0f, -15f, 15f })
-                        foreach (var p in Variants(h0, yaw0 + dy)) { probes++; Try(p, h0, yaw0 + dy, region); }
+                        foreach (var p in AimVariants(h0, yaw0 + dy)) { probes++; Try(p, h0, yaw0 + dy, region); }
                     if (frame.Elapsed.TotalMilliseconds > frameBudgetMs)
                     {
                         state = $"добираю серые места: участков {reachable.Count}, опытов {sims}, найдено {best.Count}";
@@ -143,7 +146,7 @@ public class LabLinks
     }
 
     // ---------------- the search state ----------------
-    Queue<int> queue; Dictionary<(int, int, int, int, int, int), Link> best; int edgesDone, edgesTotal;
+    Queue<int> queue; Dictionary<(int, int, int, int, int, int), Link> best; int edgesDone, edgesTotal; HashSet<int> chainDone;
 
         // one try: the move p from the spot `spot` of region `region` in the direction yaw; a good landing becomes a link
     int Try(LabSim.Params p, Vector3 spot, float yaw, int region)
@@ -168,7 +171,7 @@ public class LabLinks
             }
             var link = new Link
             {
-                move = p.move, from = p.feet, to = r.landing, yaw = yaw, runUp = p.runUp, pitch = p.pitch, fireDelay = p.fireDelay, hops = p.hops, shots = p.shots, backwards = p.backwards,
+                move = p.move, from = p.feet, to = r.landing, yaw = yaw, runUp = p.runUp, pitch = p.pitch, fireDelay = p.fireDelay, hops = p.hops, shots = p.shots, backwards = p.backwards, firstShotHop = p.firstShotHop,
                 time = r.time, rise = r.Rise, peak = r.maxRise, distance = LabSim.Horizontal(r.landing - p.feet), fromRegion = region, toRegion = to, shortcut = shortcut, fallDamage = r.fallDamage,
                 path = r.path.Where((x, k) => k % 24 == 0 || k == r.path.Count - 1).ToArray(),
             };
@@ -211,6 +214,100 @@ public class LabLinks
         }
     }
 
+    /// <summary>Phase 2's start spots for a grey region u: the reachable spots (reachTris: cells of reachable regions) nearest to it in
+    /// 3D (horizontally within 60), at least 5 apart, at most 3 of one region, 8 at most; each with the nearest cell of u to aim at.
+    /// Horizontally alone the floor right under a high roof won and every start was 40 below it, none on the roof next to it a jump
+    /// away (the owner, 15.11.2026, Комиссариат: yellow roof → the small roof above).</summary>
+    public List<(Vector3 from, Vector3 at)> AimStarts(int u, List<int> reachTris)
+    {
+        var starts = new List<(Vector3 from, Vector3 at)>();
+        var uTris = Enumerable.Range(0, world.cellCount).Where(t => world.cellRegion[t] == u).Select(t => world.cells[t]).Where((x, k) => k % 4 == 0).ToList();
+        if (uTris.Count == 0) return starts;
+        var cands = new List<(Vector3 from, Vector3 at, float d)>();
+        foreach (int t in reachTris)
+        {
+            var c = world.cells[t]; Vector3 at = uTris[0]; float bd = float.MaxValue;
+            foreach (var q in uTris) { float d = Vector3.Distance(q, c); if (d < bd) { bd = d; at = q; } }
+            if (LabSim.Horizontal(at - c) < 60f) cands.Add((c, at, bd));
+        }
+        var perRegion = new Dictionary<int, int>();
+        foreach (var c in cands.OrderBy(x => x.d))
+        {
+            int rg = world.RegionAt(c.from); perRegion.TryGetValue(rg, out int cnt); if (cnt >= 3) continue;
+            // not right under the target: its own floor is the ceiling there and every jump hits its head on it (the nearest spots in
+            // 3D were 1 across and 14 under the small roof; the owner jumped from 10 away, out from under it)
+            // and not up against it: a climb needs room to go up beside it and over the edge. From 1–5 across under a roof 14 up every
+            // move hit its side (peak +4…+7); the owner jumped from 10 across. So for a rise r at least min(8, r/2) across
+            float rise = c.at.y - c.from.y;
+            if (rise > 4f && LabSim.Horizontal(c.at - c.from) < Mathf.Min(8f, rise * 0.5f)) continue;
+            if (c.at.y > c.from.y + 2f && Physics.Raycast(c.from + Vector3.up * 6.6f, Vector3.up, c.at.y - c.from.y + 2f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore)) continue;
+            if (starts.All(s0 => LabSim.Horizontal(s0.from - c.from) > 5f || Mathf.Abs(s0.from.y - c.from.y) > 3f)) { starts.Add((c.from, c.at)); perRegion[rg] = cnt + 1; }
+            if (starts.Count >= 8) break;
+        }
+        return starts;
+    }
+
+    /// <summary>Diagnostics: phase 2 for one grey region, told — each start, and per move what became of the try.</summary>
+    public IEnumerator AimDiag(int u, System.Action<string> log)
+    {
+        var reachTris = new List<int>(); for (int t = 0; t < world.cellCount; t += 3) if (reachable.Contains(world.cellRegion[t])) reachTris.Add(t);
+        foreach (var (h0, at) in AimStarts(u, reachTris))
+        {
+            int region = world.RegionAt(h0);
+            var to = at - h0; to.y = 0f; float yaw0 = to.sqrMagnitude > 0.01f ? Quaternion.LookRotation(to).eulerAngles.y : 0f;
+            var sb = new System.Text.StringBuilder($"aim at {u}: from {h0} (region {region}) to {at}, {LabSim.Horizontal(at - h0):F1} across, {at.y - h0.y:+0.0;-0.0} up:");
+            foreach (float dy in new[] { 0f, -15f, 15f })
+                foreach (var p in AimVariants(h0, yaw0 + dy))
+                {
+                    var dir = Quaternion.Euler(0f, yaw0 + dy, 0f) * Vector3.forward; float back = RunUpLength(p); var from = h0 - dir * back;
+                    string res;
+                    if (back > 0f && (world.RegionAt(from) != region || Physics.CapsuleCast(from + Vector3.up * 2.6f, from + Vector3.up * 5.4f, 1.2f, dir, back, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore))) res = "no run-up room";
+                    else if (!world.Snap(from, 1.5f, out var feet)) res = "no snap";
+                    else
+                    {
+                        p.feet = feet; p.yaw = yaw0 + dy; p.fps = LabSim.BotFps; p.maxTime = 5f;
+                        var r = LabSim.Run(ghost, p);
+                        res = !r.landed ? $"no landing (peak +{r.maxRise:F1})" : !r.onWalkable ? $"off the grid at {r.landing}" : $"region {world.RegionAt(r.landing)} at {r.landing} (peak +{r.maxRise:F1})";
+                    }
+                    sb.Append($"\n      {dy:+0;-0;0}° {p.move} {p.shots}sh {p.pitch:F0}°: {res}");
+                }
+            log(sb.ToString());
+            yield return null;
+        }
+    }
+
+    /// <summary>Phase 1b: for every reachable small top (under 30 sq: a barrel, a crate) above a reachable floor, from that floor 5 and 9
+    /// away in 16 directions: run at it, jump onto it and at once off it with the shotgun (LabSim firstShotHop 2), back first (on over
+    /// it) or facing it (thrown up and back). Each top once per search.</summary>
+    IEnumerator ChainPhase(float frameBudgetMs, Stopwatch frame)
+    {
+        foreach (int top in reachable.ToList())
+        {
+            if (world.regionArea[top] >= 30f || !chainDone.Add(top)) continue;
+            var tc = new List<Vector3>(); for (int c = 0; c < world.cellCount; c++) if (world.cellRegion[c] == top) tc.Add(world.cells[c]);
+            if (tc.Count == 0) continue;
+            var centre = tc.Aggregate(Vector3.zero, (s, v) => s + v) / tc.Count;
+            for (int k = 0; k < 16; k++)
+                foreach (float dist in new[] { 5f, 9f })
+                {
+                    float yaw = k * 22.5f; var fwd = Quaternion.Euler(0f, yaw, 0f) * Vector3.forward;
+                    var g = centre - fwd * dist;
+                    if (!Physics.Raycast(new Vector3(g.x, centre.y + 0.5f, g.z), Vector3.down, out var h, 30f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore)) continue;
+                    if (!world.Snap(h.point, 1.5f, out var spot)) continue;
+                    int rg = world.RegionAt(spot); if (rg < 0 || rg == top || !reachable.Contains(rg) || centre.y - spot.y < 1.6f) continue;
+                    foreach (float ru in new[] { 0.3f, 0.6f })
+                        foreach (int sh in new[] { 2, 3 })
+                            foreach (var (pi, bw) in new[] { (80f, true), (65f, true), (65f, false) })
+                                Try(new LabSim.Params { move = LabSim.Move.Shotgun, runUp = ru, shots = sh, pitch = pi, backwards = bw, fireDelay = 0.1f, firstShotHop = 2 }, spot, yaw, rg);
+                    if (frame.Elapsed.TotalMilliseconds > frameBudgetMs)
+                    {
+                        state = $"прыжки с бочек и ящиков: участков {reachable.Count}, опытов {sims}, найдено {best.Count}";
+                        yield return null; frame.Restart();
+                    }
+                }
+        }
+    }
+
     /// <summary>Takes a link out again (tests).</summary>
     public void Forget(Link l) { links.Remove(l); for (int i = 0; i < links.Count; i++) links[i].id = i; thinned = null; Save(); }
 
@@ -226,7 +323,7 @@ public class LabLinks
         float yaw0 = dir.sqrMagnitude > 0.01f ? Quaternion.LookRotation(dir).eulerAngles.y : 0f;
         var tries = new List<LabSim.Params>();
         bool rocket = his == LabSim.Move.Rocket || his == LabSim.Move.RocketShotgun;
-        foreach (float ru in new[] { 0f, 0.3f, 0.6f, 1f })
+        foreach (float ru in new[] { 0f, 0.1f, 0.15f, 0.2f, 0.3f, 0.6f, 1f })
         {
             tries.Add(new LabSim.Params { move = LabSim.Move.Walk, runUp = Mathf.Max(0.4f, ru + 0.4f) });
             tries.Add(new LabSim.Params { move = ru == 0f ? LabSim.Move.Jump : LabSim.Move.RunJump, runUp = ru });

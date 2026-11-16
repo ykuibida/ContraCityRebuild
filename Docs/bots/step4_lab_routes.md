@@ -296,3 +296,38 @@ Long run over Комиссариат, 162 on foot: rifle 10.1 s, calm 7.0 s play
   - Комиссариат: if no enemy is seen, running with the bat is low risk.
   - Ангар, задний двор: running with the bat is risky, and dashing with the shotgun is a bit risky too. Long dashes are still fine; the bot does not dash short pieces anyway.
 - **Check in practice** once bots play.
+
+## Search fixes from the owner's Комиссариат walk (16.11.2026, cache version 9)
+
+**What the owner showed:** two jumps the lab did not know.
+- **From a barrel onto the yellow roof.** The bot went round, about 10 s.
+- **From the yellow roof onto the small roof above it.** The small roof was grey.
+
+**Why** (`-labdiag`: his jumps repeated from his own take-off spots):
+- **Barrel.** The barrel top is 9 sq: no room for a run-up. From a standstill no move gets +21 up (742 tries). He ran at the barrel, jumped onto it and at once off it, firing; the speed came from the floor.
+- **Small roof.** The simulation does repeat this one (shotgun, 1 shot, 85°, fired 0.08 s after the take-off). The search did not try it, for two reasons:
+  - **Wrong spots.** The aimed tries (phase 2) took the spots nearest by horizontal distance: the floor 40 below the roof. Then, by 3D distance, the spots 1–5 across under its edge, where every move hits the roof's side.
+  - **Too weak.** The edge moves fire at 0.15 s and peaked at +10.7; the roof is +14.
+
+**Fixes** (`LabLinks`):
+- **Phase 1b `ChainPhase`.** For every reachable small top (under 30 sq: barrels, crates) above a reachable floor:
+  - From the floor 5 and 9 away, in 16 directions: run at it, jump onto it, at once off it with the shotgun. `LabSim.Params.firstShotHop = 2`: the shots start at the 2nd take-off.
+  - Run-up 0.3 / 0.6 s, 2 or 3 shots, back first (on over it) or facing it (thrown up and back).
+  - Recipe: «запрыгнуть на бочку/ящик, сразу второй прыжок с него».
+- **`AimStarts`** (phase 2 start spots):
+  - Nearest in 3D, at most 3 per region, 8 in all.
+  - Not right under the target; for a rise r, at least min(8, r/2) across.
+- **`AimVariants`.** Phase 2 also tries climbs with the shotgun fired early: 1 or 2 shots at 85°, 0.08 s; 2 shots at 70° after a 0.3 s run-up.
+
+**Result** (all four maps re-searched; all test routes reached; 0 exceptions):
+
+| Map | Regions | Links | Chain jumps | Note |
+|---|---|---|---|---|
+| Форпост | 135 (same) | 19 305 (was ~17 150) | 1 583 | area and battle routes the same (9.3 / 10.3 / 10.1 s) |
+| Комиссариат | 90 (was 87) | 18 283 | 765 | barrel → roof 3.9 s; small roof reachable; every owner jump known |
+| Ангар, задний двор | 59 (was 58) | 10 695 | 78 | |
+| Монетный двор | 68 (same) | 16 901 | 794 | battle routes 7.1 / 8.9 / 8.4 s (were 13.6 / 12.8 / 9.5): onto a crate and off it |
+
+**The owner checked the new jumps (16.11.2026):** "the unusual, hard jumps I tried, the bots can repeat them all". Nothing superfluous or impossible. The bot uses the shotgun and the bat wherever it can. Checkpoint `checkpoint-lab-search-2`.
+
+**Running the lab faster:** one game process per map, all at once: 4 maps in about 16 min instead of 40+.

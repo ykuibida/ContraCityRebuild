@@ -704,7 +704,7 @@ public class LabController : MonoBehaviour
             int r = world.cellRegion[c];
             return $"cell {world.cells[c]} region {r} ({world.regionArea[r]:F0} sq, {(links.reachable.Contains(r) ? "reachable" : "GREY")}, {world.boundary.Count(e => e.region == r)} edge spots, links from it {links.links.Count(l => l.fromRegion == r)})";
         }
-        int n = 0;
+        int n = 0; var aimed = new HashSet<int>();
         foreach (var f in Directory.GetFiles(walkDir, map + "_*.jumps.txt").OrderBy(x => x))
             foreach (var line in File.ReadAllLines(f))
             {
@@ -722,10 +722,46 @@ public class LabController : MonoBehaviour
                 if (world.CellAt(b, 2f) < 0) Log($"{map}: owner jump {n} landing grid:{world.WhyApart(b - side * 2f, b + side * 2f)}");
                 LabLinks.Link got = null; string why = ""; var sw = System.Diagnostics.Stopwatch.StartNew();
                 int rb = world.RegionAt(b, 2f); bool wasReachable = rb >= 0 && links.reachable.Contains(rb);
+                if (rb >= 0 && !wasReachable && aimed.Add(rb)) yield return links.AimDiag(rb, s => Log($"{map}: owner jump {n} {s}"));
                 yield return links.Reproduce(a, b, mv, (l, w) => { got = l; why = w; });
                 Log($"{map}: owner jump {n} repeated: {(got != null ? $"{got.move} {got.Params().Recipe()} from {got.from} lands {got.to}, {got.time:F2} s" : "no")}; {why}; {sw.Elapsed.TotalSeconds:F0} s");
                 if (got != null) { if (!wasReachable) links.reachable.Remove(rb); links.Forget(got); }
+                // a small take-off top (a barrel, a crate): the owner ran at it from the floor, jumped on and at once off it, firing
+                // (15.11.2026, Комиссариат: onto the barrel going one way, the shot under him threw him up and back onto the roof)
+                int ca = world.CellAt(a, 2f);
+                if (got == null && ca >= 0 && world.regionArea[world.cellRegion[ca]] < 30f) ChainDiag(n, world.cells[ca], b, rb);
             }
+    }
+
+    /// <summary>Diagnostics: from the floor around a small top (16 directions, 3–9 away), run at it, jump onto it and at once off it
+    /// firing the shotgun (LabSim firstShotHop 2), facing it or back first. Logs how many land in the region rb and the best.</summary>
+    void ChainDiag(int n, Vector3 top, Vector3 landing, int rb)
+    {
+        int tries = 0, onTop = 0, ok = 0; string best = "none"; float bestT = 99f;
+        for (int k = 0; k < 16; k++)
+            foreach (float dist in new[] { 3f, 5f, 7f, 9f })
+            {
+                float yaw = k * 22.5f; var fwd = Quaternion.Euler(0f, yaw, 0f) * Vector3.forward;
+                var g = top - fwd * dist;
+                if (!Physics.Raycast(new Vector3(g.x, top.y + 0.5f, g.z), Vector3.down, out var h, 30f, ~(1 << CharacterMotor.GhostLayer), QueryTriggerInteraction.Ignore)) continue;
+                if (!world.Snap(h.point, 1.5f, out var spot) || world.RegionAt(spot) == world.RegionAt(top)) continue;
+                foreach (float ru in new[] { 0.3f, 0.6f })
+                    foreach (int sh in new[] { 1, 2, 3 })
+                        foreach (float pi in new[] { 50f, 65f, 80f })
+                            foreach (bool bw in new[] { false, true })
+                            {
+                                var p = new LabSim.Params { move = LabSim.Move.Shotgun, runUp = ru, shots = sh, pitch = pi, backwards = bw, fireDelay = 0.1f, firstShotHop = 2 };
+                                float back = ru * 16f * 0.85f; var from = spot - fwd * back;
+                                if (!world.Snap(from, 1.5f, out var feet) || world.RegionAt(feet) != world.RegionAt(spot)) continue;
+                                p.feet = feet; p.yaw = yaw; p.fps = LabSim.BotFps; p.maxTime = 6f;
+                                var r = LabSim.Run(ghost, p); tries++;
+                                if (r.path.Any(q => LabSim.Horizontal(q - top) < 1.5f && Mathf.Abs(q.y - top.y) < 0.5f)) onTop++;
+                                if (!r.landed || !r.onWalkable || world.RegionAt(r.landing) != rb) continue;
+                                ok++;
+                                if (r.time < bestT) { bestT = r.time; best = $"from {feet} yaw {yaw:F0} ({dist} from the top): {p.Recipe()}, lands {r.landing}, {r.time:F2} s"; }
+                            }
+            }
+        Log($"{map}: owner jump {n} chain from the floor: {tries} tries, {onTop} passed over the top, {ok} landed there; best {best}");
     }
 
     /// <summary>Diagnostics (-labdiag): how quickly each way covers flat open ground (a floor far under the map, no walls), from a
@@ -743,6 +779,8 @@ public class LabController : MonoBehaviour
             float t = r.landingT > 0f ? r.landingT : r.time, d = LabSim.Horizontal((r.landed ? r.landing : ghost.transform.position) - feet);
             Log($"{map}: flat {what}: {d:F1} in {t:F2} s = {d / Mathf.Max(0.01f, t):F2}/s (landed {r.landed})");
         }
+        foreach (float s in new[] { 0.1f, 0.15f, 0.2f, 0.3f })
+            One($"run rifle {s} s (run-up)", new LabSim.Params { move = LabSim.Move.Walk, runUp = s });
         foreach (float s in new[] { 2f, 5f, 9f })
         {
             One($"run rifle {s} s", new LabSim.Params { move = LabSim.Move.Walk, runUp = s });
@@ -804,6 +842,23 @@ public class LabController : MonoBehaviour
                     }
                     Log($"{map}: owner's walk {Path.GetFileName(f)}: {steps} grounded steps, on the walk grid {onGrid} ({100f * onGrid / Mathf.Max(1, steps):F0}%), reachable {reach} ({100f * reach / Mathf.Max(1, steps):F0}%)");
                 }
+        }
+        // the owner's recorded jumps: what the bot knows now from each take-off to its landing (in battle mode: jumps only)
+        {
+            var walkDir = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "..", "Docs", "bots", "lab_walks"));
+            var rx = new System.Text.RegularExpressions.Regex(@"^(\w+) \((-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\) -> \((-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\) air ([\d,]+) s");
+            float F(string s) => float.Parse(s.Replace(',', '.'), System.Globalization.CultureInfo.InvariantCulture);
+            if (Directory.Exists(walkDir))
+                foreach (var f in Directory.GetFiles(walkDir, map + "_*.jumps.txt").OrderBy(x => x))
+                    foreach (var line in File.ReadAllLines(f))
+                    {
+                        var m = rx.Match(line); if (!m.Success) continue;
+                        var ja = new Vector3(F(m.Groups[2].Value), F(m.Groups[3].Value), F(m.Groups[4].Value));
+                        var jb = new Vector3(F(m.Groups[5].Value), F(m.Groups[6].Value), F(m.Groups[7].Value));
+                        int rb = world.RegionAt(jb, 2f);
+                        var r = rb >= 0 && links.reachable.Contains(rb) ? links.FindRoute(ja, jb, ~0, false) : null;
+                        Log($"{map}: owner jump {Path.GetFileName(f)} {m.Groups[1].Value} {ja} -> {jb} (his air {m.Groups[8].Value} s): {(r != null ? r.Describe() : rb < 0 ? "landing off the grid" : links.reachable.Contains(rb) ? "no route" : $"region {rb} grey")}");
+                    }
         }
         yield return GreyDiagnostics();
         // overview: all links over the reachable surface

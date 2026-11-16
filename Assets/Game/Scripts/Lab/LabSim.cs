@@ -51,6 +51,7 @@ public static class LabSim
         public float pitch = 50f;           // shotgun: camera pitch, + = down (the rocket is always fired at the feet, 85°)
         public float fireDelay = 0.15f;     // seconds after take-off before the first shot
         public int shots = 2;               // shotgun: shots in the air (clip 3, one per max(shot time, 0.45 s))
+        public int firstShotHop = 1;        // shotgun: the take-off from which the shots start (2: jump onto a barrel or a crate first, then off it firing)
         public bool backwards = true;       // shotgun: back to the direction of travel, moving with S (the usual technique)
         public float fps = BotFps;          // simulation frame rate
         public float maxTime = 6f;
@@ -68,7 +69,7 @@ public static class LabSim
                 case Move.RunJump: return run + "прыжок";
                 case Move.Bunnyhop: return run + $"распрыжка, {hops} прыжка";
                 case Move.Bat: return "бита в руке, " + run + $"{hops} прыжка";
-                case Move.Shotgun: return (backwards ? "спиной вперёд, назад на S, " : "") + run + $"прыжок и {shots} выстр. из дробовика под себя ({pitch:F0}° вниз) через {fireDelay:F2} с после каждого отрыва";
+                case Move.Shotgun: return (backwards ? "спиной вперёд, назад на S, " : "") + run + (firstShotHop > 1 ? "запрыгнуть на бочку/ящик, сразу второй прыжок с него и" : "прыжок и") + $" {shots} выстр. из дробовика под себя ({pitch:F0}° вниз) через {fireDelay:F2} с после каждого отрыва";
                 case Move.Rocket: return run + $"прыжок, ракета под ноги через {fireDelay:F2} с";
                 default: return run + $"прыжок, ракета под ноги, смена на дробовик, {shots} выстр. под себя ({pitch:F0}° вниз)";
             }
@@ -210,7 +211,7 @@ public static class LabSim
             s.Step(k, dt, now);
 
             // weapons fired this frame (before the motor step, see the header)
-            if (airborne && t >= nextShot && (rocketsLeft > 0 || shotsLeft > 0))
+            if (airborne && t >= nextShot && (rocketsLeft > 0 || shotsLeft > 0) && takeoffs >= p.firstShotHop)
             {
                 cc.enabled = false;   // the live player is on layer 2, which the shot masks leave out; the ghost is not
                 if (rocketsLeft > 0)
